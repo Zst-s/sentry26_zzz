@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lsusb)",
+      "Read(//opt/**)",
+      "Read(//home/doublegun/**)",
+      "Read(//usr/local/**)",
+      "Read(//dev/**)",
+      "Bash(dmesg)",
+      "Read(//etc/udev/rules.d/**)",
+      "Bash(find / -name \"*stlink*\" -path \"*udev*\")",
+      "Bash(find / -name \"*stlink*.rules\")",
+      "Read(//usr/lib/udev/rules.d/**)",
+      "Bash(udevadm info *)",
+      "Read(//tmp/**)",
+      "Bash(st-flash read *)"
+    ]
+  }
+}

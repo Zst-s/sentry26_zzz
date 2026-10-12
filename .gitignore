@@ -1,0 +1,25 @@
+# ===== 编译产物 (ROS2 / colcon / CMake) =====
+build/
+install/
+log/
+build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+*.o
+*.a
+*.so
+!zzs_rogMAP/src/rm_driver/livox_ros_driver2/src/lib/liblivox_lidar_sdk_shared.so
+*.d
+*.cmake
+*.make
+*.stamp
+*.internal
+
+# ===== Python =====
+__pycache__/
+*.pyc
+
+# ===== 日志 =====
+*.log

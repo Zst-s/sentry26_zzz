@@ -1,0 +1,5 @@
+<library path="terrain_layer">
+  <class name="sentry_terrain_bridge::TerrainLayer" type="sentry_terrain_bridge::TerrainLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>将 odom 系的 ROGMap 完整滚动投影变换到 Nav2 地图；不发布 TF 或速度。</description>
+  </class>
+</library>
