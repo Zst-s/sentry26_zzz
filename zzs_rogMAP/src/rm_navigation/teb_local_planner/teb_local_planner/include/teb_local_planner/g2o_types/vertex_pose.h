@@ -63,6 +63,9 @@ namespace teb_local_planner
 class VertexPose : public g2o::BaseVertex<3, PoseSE2 >
 {
 public:
+  // 仅冻结 yaw，不能用 setFixed(true)：后者会连 X/Y 一起冻结。
+  void setYawLocked(bool locked) { yaw_locked_ = locked; }
+  bool yawLocked() const { return yaw_locked_; }
 
   /**
     * @brief Default constructor
@@ -194,7 +197,12 @@ public:
     */ 
   virtual void oplusImpl(const double* update) override
   {
-    _estimate.plus(update);
+    if (yaw_locked_) {
+      const double translation_update[3] = {update[0], update[1], 0.0};
+      _estimate.plus(translation_update);
+    } else {
+      _estimate.plus(update);
+    }
   }
 
   /**
@@ -222,6 +230,8 @@ public:
   }
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW  
+private:
+  bool yaw_locked_{false};
 };
 
 }

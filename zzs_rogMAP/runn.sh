@@ -10,7 +10,7 @@ cmds=(  "ros2 launch rm_nav_bringup bringup_real.launch.py \
             lio_rviz:=False \
             nav_rviz:=True"
         "ros2 run decision trans_node"
-        "ros2 run decision rosout_node"
+        "ros2 run decision rosout_node2"
         #"ros2 run decision decision"
         #"ros2 run decision mytest"
         #"ros2 run py_tools publish_initial_pose 0.0 0.0 0.0 0.0 0.0 0.0 0.0"

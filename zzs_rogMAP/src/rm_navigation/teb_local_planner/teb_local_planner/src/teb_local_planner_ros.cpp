@@ -37,6 +37,7 @@
  *********************************************************************/
 
 #include "teb_local_planner/teb_local_planner_ros.h"
+#include "teb_local_planner/goal_approach.h"
 
 //#include <tf_conversions/tf_eigen.h>
 #include <boost/algorithm/string.hpp>
@@ -305,12 +306,35 @@ geometry_msgs::msg::TwistStamped TebLocalPlannerROS::computeVelocityCommands(con
       std::string("Transformed plan is empty. Cannot determine a local plan.")
     );
   }
+
+  if (cfg_->trajectory.follow_global_plan_orientation &&
+      (cfg_->trajectory.global_plan_overwrite_orientation || cfg_->hcp.enable_homotopy_class_planning))
+  {
+    throw nav2_core::PlannerException(
+      "follow_global_plan_orientation requires global_plan_overwrite_orientation=false "
+      "and enable_homotopy_class_planning=false");
+  }
               
   // Get current goal point (last point of the transformed plan)
+  if (cfg_->trajectory.shortest_rotation_initialization && cfg_->hcp.enable_homotopy_class_planning)
+  {
+    throw nav2_core::PlannerException(
+      "shortest_rotation_initialization currently requires enable_homotopy_class_planning=false");
+  }
   const geometry_msgs::msg::PoseStamped &goal_point = transformed_plan.back();
   robot_goal_.x() = goal_point.pose.position.x;
   robot_goal_.y() = goal_point.pose.position.y;
-  if (cfg_->trajectory.global_plan_overwrite_orientation)
+  if (cfg_->trajectory.translation_only)
+  {
+    if (cfg_->robot.max_vel_y <= 0 || cfg_->robot.cmd_angle_instead_rotvel ||
+        cfg_->hcp.enable_homotopy_class_planning || cfg_->trajectory.follow_global_plan_orientation)
+      throw nav2_core::PlannerException("translation_only requires holonomic motion, no car steering, no homotopy and follow_global_plan_orientation=false");
+    robot_goal_.theta() = robot_pose_.theta();
+    tf2::Quaternion q;
+    q.setRPY(0, 0, robot_pose_.theta());
+    for (auto& point : transformed_plan) point.pose.orientation = tf2::toMsg(q);
+  }
+  else if (cfg_->trajectory.global_plan_overwrite_orientation)
   {
     robot_goal_.theta() = estimateLocalGoalOrientation(global_plan_, goal_point, goal_idx, tf_plan_to_global);
     // overwrite/update goal orientation of the transformed plan with the actual goal (enable using the plan as initialization)
@@ -423,8 +447,32 @@ geometry_msgs::msg::TwistStamped TebLocalPlannerROS::computeVelocityCommands(con
   }
   
   // Saturate velocity, if the optimization results violates the constraints (could be possible due to soft constraints).
+  if (cfg_->trajectory.translation_only) cmd_vel.twist.angular.z = 0.0;
   saturateVelocity(cmd_vel.twist.linear.x, cmd_vel.twist.linear.y, cmd_vel.twist.angular.z, cfg_->robot.max_vel_x, cfg_->robot.max_vel_y,
                    cfg_->robot.max_vel_theta, cfg_->robot.max_vel_x_backwards);
+
+  // 使用完整全局路径终点，而不是局部窗口/恢复机制截短后的子目标。
+  // 这是输出速度上限，不是新增 g2o 优化边；不会提高原本很小的速度。
+  if (cfg_->trajectory.goal_approach_enabled)
+  {
+    geometry_msgs::msg::PoseStamped final_goal;
+    tf2::doTransform(global_plan_.back(), final_goal, tf_plan_to_global);
+    const double distance = std::hypot(final_goal.pose.position.x - robot_pose_.x(),
+                                      final_goal.pose.position.y - robot_pose_.y());
+    try
+    {
+      const double scale = goalApproachScale(distance, cfg_->trajectory.goal_approach_distance,
+          cfg_->trajectory.goal_approach_max_speed, cmd_vel.twist.linear.x, cmd_vel.twist.linear.y);
+      cmd_vel.twist.linear.x *= scale;
+      cmd_vel.twist.linear.y *= scale;
+      // 同步缩放角速度，避免只降平移却增大转弯曲率；纯原地旋转不受影响。
+      cmd_vel.twist.angular.z *= scale;
+    }
+    catch (const std::invalid_argument& error)
+    {
+      throw nav2_core::PlannerException(error.what());
+    }
+  }
 
   // convert rot-vel to steering angle if desired (carlike robot).
   // The min_turning_radius is allowed to be slighly smaller since it is a soft-constraint

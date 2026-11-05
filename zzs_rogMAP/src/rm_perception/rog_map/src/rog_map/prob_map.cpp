@@ -256,6 +256,31 @@ double ProbMap::cellLastUpdateTime(const Vec3i & id_g) const
   return last_update_time_[getHashIndexFromGlobalIndex(id_g)];
 }
 
+void ProbMap::enableObservationTracking()
+{
+  // 启用前的历史数据没有可靠的观测来源证明，必须重新观测。
+  if (direct_observation_time_.empty()) {
+    direct_observation_time_.assign(occupancy_buffer_.size(), 0.0);
+  }
+}
+
+double ProbMap::cellDirectObservationTime(const Vec3i & id_g) const
+{
+  if (!insideLocalMap(id_g) || direct_observation_time_.empty()) { return 0.0; }
+  return direct_observation_time_[getHashIndexFromGlobalIndex(id_g)];
+}
+
+GridType ProbMap::rawObservedType(const Vec3i & id_g) const
+{
+  // 不用 getGridType 的虚拟地板/天花板充当真实地面支撑。
+  if (!insideLocalMap(id_g)) { return GridType::OUT_OF_MAP; }
+  if (id_g.z() <= sc_.virtual_ground_height_id_g ||
+      id_g.z() >= sc_.virtual_ceil_height_id_g - sc_.safe_margin_i) {
+    return GridType::UNKNOWN;
+  }
+  return classifyProb(occupancy_buffer_[getHashIndexFromGlobalIndex(id_g)]);
+}
+
 bool ProbMap::isFrontier(const Vec3i & id_g) const
 {
   // 1) Check local map
@@ -648,6 +673,7 @@ void ProbMap::resetCell(const int & hash_id)
     markDirtyColumn(id_g);
     last_hit_time_[hash_id] = 0.0f;
     last_update_time_[hash_id] = 0.0f;
+    if (!direct_observation_time_.empty()) { direct_observation_time_[hash_id] = 0.0; }
     active_flags_[hash_id] = 0U;
   }
 }
@@ -734,6 +760,9 @@ void ProbMap::hitPointUpdate(const Vec3f & pos, const int & hash_id, const int &
   if (hash_id >= 0 && hash_id < static_cast<int>(last_hit_time_.size())) {
     last_hit_time_[hash_id] = current_update_time_;
     last_update_time_[hash_id] = current_update_time_;
+    if (!direct_observation_time_.empty()) {
+      direct_observation_time_[hash_id] = current_update_time_;
+    }
     if (cfg_.decay_active_list_en && hash_id < static_cast<int>(active_flags_.size()) &&
         !active_flags_[hash_id]) {
       active_flags_[hash_id] = 1U;
@@ -756,9 +785,12 @@ void ProbMap::missPointUpdate(const Vec3f & pos, const int & hash_id, const int 
   Vec3i id_g;
   posToGlobalIndex(pos, id_g);
   markDirtyColumn(id_g);
-
   if (hash_id >= 0 && hash_id < static_cast<int>(last_update_time_.size())) {
     last_update_time_[hash_id] = static_cast<float>(current_update_time_);
+    // 独立保存 double 精度时间；不改动现有导航时间字段及更新算法。
+    if (!direct_observation_time_.empty()) {
+      direct_observation_time_[hash_id] = current_update_time_;
+    }
   }
 }
 
@@ -783,28 +815,28 @@ bool ProbMap::applyDecay(double now)
       next_active->push_back(hash_id);
     }
   };
-
+  
   auto clearActive = [&](const int hash_id) {
     if (cfg_.decay_active_list_en && hash_id >= 0 &&
         hash_id < static_cast<int>(active_flags_.size())) {
       active_flags_[hash_id] = 0U;
     }
   };
-
+  
   auto decayOne = [&](const int hash_id, std::vector<int> * next_active) {
     if (hash_id < 0 || hash_id >= static_cast<int>(occupancy_buffer_.size()) ||
         hash_id >= static_cast<int>(last_hit_time_.size()) ||
         hash_id >= static_cast<int>(last_update_time_.size())) {
       return;
     }
-
+  
     float & prob = occupancy_buffer_[hash_id];
     const GridType from_type = classifyProb(prob);
     if (from_type != GridType::OCCUPIED) {
       clearActive(hash_id);
       return;
     }
-
+       
     const double last_hit = static_cast<double>(last_hit_time_[hash_id]);
     if (!(last_hit > 0.0) || now <= last_hit) {
       keepActive(hash_id, next_active);
@@ -816,7 +848,6 @@ bool ProbMap::applyDecay(double now)
       keepActive(hash_id, next_active);
       return;
     }
-
     const double old_log = static_cast<double>(prob);
     double new_log = old_log;
     if (age >= clear_time) {
@@ -832,6 +863,8 @@ bool ProbMap::applyDecay(double now)
     if (new_log < old_log - 1.0e-6) {
       prob = static_cast<float>(new_log);
       last_update_time_[hash_id] = now;
+      // 概率随时间变小不是雷达看穿了障碍：撤销诊断证据，等待新射线。
+      if (!direct_observation_time_.empty()) { direct_observation_time_[hash_id] = 0.0; }
 
       const GridType to_type = classifyProb(prob);
       Vec3f pos;
@@ -1173,7 +1206,7 @@ void ProbMap::insertUpdateCandidate(const Vec3i & id_g, bool is_hit)
   }
   if (is_hit) {
     raycast_data_.hit_cnt[hash_id]++;
-    runtime_stats_.hit_count += 1.0;
+    runtime_stats_.hit_count += 1.0; 
   } else {
     runtime_stats_.miss_count += 1.0;
   }
@@ -1263,6 +1296,7 @@ void ProbMap::resetLocalMap()
   std::fill(occupancy_buffer_.begin(), occupancy_buffer_.end(), unk_value);
   std::fill(last_hit_time_.begin(), last_hit_time_.end(), 0.0f);
   std::fill(last_update_time_.begin(), last_update_time_.end(), 0.0f);
+  std::fill(direct_observation_time_.begin(), direct_observation_time_.end(), 0.0);
   std::fill(active_flags_.begin(), active_flags_.end(), 0U);
   active_ids_.clear();
   markAllDirtyColumns();

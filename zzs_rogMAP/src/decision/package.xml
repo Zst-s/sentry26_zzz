@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
   <depend>std_msgs</depend>
   <depend>base_interfaces_demo</depend>
   <depend>rm_decision_interfaces</depend>
@@ -18,11 +19,15 @@
   <depend>tf2_ros</depend>
   <depend>tf2</depend>
   <depend>rcl_interfaces</depend>
+  <depend>serial</depend>
 
   <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_cmake_test</test_depend>
+  <test_depend>rclpy</test_depend>
   <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
   </export>
+  <depend>diagnostic_msgs</depend>
 </package>

@@ -151,6 +151,14 @@ pluginlib_export_plugin_description_file(nav2_core teb_local_planner_plugin.xml)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(translation_only_test test/translation_only_test.cpp)
+  target_link_libraries(translation_only_test teb_local_planner)
+  ament_target_dependencies(translation_only_test ${ament_dependencies})
+  ament_add_gtest(goal_approach_test test/goal_approach_test.cpp)
+  target_include_directories(goal_approach_test PRIVATE include)
+  ament_add_gtest(shortest_rotation_test test/shortest_rotation_test.cpp)
+  target_link_libraries(shortest_rotation_test teb_local_planner)
+  ament_target_dependencies(shortest_rotation_test ${ament_dependencies})
   #ament_add_gtest(homotopy_class_planner_test
   #    test/homotopy_class_planner_test.cpp
   #)

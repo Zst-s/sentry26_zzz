@@ -267,6 +267,7 @@ public:
   
   /**
     * @brief Default constructor of the abstract obstacle class
+    // 前圆圆心沿机器人朝向、从后轴中心的偏移量（单位：米）
     * @param front_offset shift the center of the front circle along the robot orientation starting from the center at the rear axis (in meters)
     * @param front_radius radius of the front circle
     * @param rear_offset shift the center of the rear circle along the opposite robot orientation starting from the center at the rear axis (in meters)
@@ -384,6 +385,7 @@ private:
  * @class LineRobotFootprint
  * @brief Class that approximates the robot with line segment (zero-width)
  */
+ // 一条宽度为零的线段来近似机器人的轮廓
 class LineRobotFootprint : public BaseRobotFootprintModel
 {
 public:
@@ -538,6 +540,7 @@ public:
  * @class PolygonRobotFootprint
  * @brief Class that approximates the robot with a closed polygon
  */
+ // 封闭多边形
 class PolygonRobotFootprint : public BaseRobotFootprintModel
 {
 public:

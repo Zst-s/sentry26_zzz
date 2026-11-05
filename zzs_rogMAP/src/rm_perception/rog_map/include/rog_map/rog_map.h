@@ -122,6 +122,10 @@ namespace rog_map {
 
         RobotState getRobotState() const;
 
+        std::shared_ptr<const ProjectionLayer> getProjectionLayer() const {
+            return layer_;
+        }
+
         std::shared_ptr<MapQueryInterface> getQueryInterface() const {
             return query_;
         }

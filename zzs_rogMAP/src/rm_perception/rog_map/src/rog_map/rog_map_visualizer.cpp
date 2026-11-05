@@ -41,6 +41,8 @@ void ROGMapVisualizer::configure(const rclcpp::node_interfaces::NodeBaseInterfac
     parameters, topics, "/rog_map/layer_value_static", qos);
   pubs_.layer_type_pub =
     createPublisher<nav_msgs::msg::OccupancyGrid>(parameters, topics, "/rog_map/layer_type", qos);
+  pubs_.reason_pub = createPublisher<visualization_msgs::msg::MarkerArray>(
+    parameters, topics, "/rog_map/classification_reasons", qos);
   pubs_.layer_confidence_pub =
     createPublisher<nav_msgs::msg::OccupancyGrid>(parameters, topics, "/rog_map/layer_confidence", qos);
   pubs_.layer_height_delta_pub =

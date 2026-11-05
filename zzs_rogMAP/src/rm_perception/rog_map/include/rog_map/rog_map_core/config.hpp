@@ -297,8 +297,6 @@ public:
     min_observed_voxels = 2;
     unknown_as_occupied = true;
     surface_height_delta_max = 0.10;
-    elevated_surface_as_obstacle = false;
-    elevated_surface_min_z_rel = 0.15;
     wall_height_delta_min = 0.20;
     wall_occupancy_ratio_min = 0.80;
     tunnel_height_delta_min = 0.24;
@@ -318,8 +316,6 @@ public:
     load("projection.min_observed_voxels", min_observed_voxels);
     load("projection.unknown_as_occupied", unknown_as_occupied);
     load("projection.surface_height_delta_max", surface_height_delta_max);
-    load("projection.elevated_surface_as_obstacle", elevated_surface_as_obstacle);
-    load("projection.elevated_surface_min_z_rel", elevated_surface_min_z_rel);
     load("projection.wall_height_delta_min", wall_height_delta_min);
     load("projection.wall_occupancy_ratio_min", wall_occupancy_ratio_min);
     load("projection.tunnel_height_delta_min", tunnel_height_delta_min);
@@ -366,10 +362,6 @@ public:
     if (!std::isfinite(surface_height_delta_max) || surface_height_delta_max < 0.0) {
       throw std::invalid_argument(
         "projection.surface_height_delta_max must be a non-negative vertical height difference.");
-    }
-    if (elevated_surface_as_obstacle && !std::isfinite(elevated_surface_min_z_rel)) {
-      throw std::invalid_argument(
-        "projection.elevated_surface_min_z_rel must be finite when elevated surfaces are obstacles.");
     }
     if (!std::isfinite(wall_height_delta_min) || wall_height_delta_min <= surface_height_delta_max) {
       throw std::invalid_argument(
@@ -565,8 +557,6 @@ public:
   int min_observed_voxels{2};
   bool unknown_as_occupied{true};
   double surface_height_delta_max{0.10};
-  bool elevated_surface_as_obstacle{false};
-  double elevated_surface_min_z_rel{0.15};
   double wall_height_delta_min{0.20};
   double wall_occupancy_ratio_min{0.80};
   double tunnel_height_delta_min{0.24};

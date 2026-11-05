@@ -13,6 +13,8 @@
 #include <rog_map_ros/rog_map_ros2.hpp>
 #include <sentry_terrain_bridge/grid_contract.hpp>
 #include <sentry_terrain_bridge/grid_scan.hpp>
+#include <sentry_terrain_bridge/clearance_observer.hpp>
+#include <sentry_terrain_bridge/hollow_structure.hpp>
 
 namespace sentry_terrain_bridge {
 // 单线程执行器串行处理点云、里程计及地图更新，不与原 LIO 争抢状态，也不发布
@@ -43,6 +45,19 @@ public:
     if (!sensor_offset_.allFinite()) {
       throw std::invalid_argument("sensor_offset 包含非有限值");
     }
+    self_filter_enabled_ = node_->declare_parameter<bool>("self_filter.enabled", false);
+    if (self_filter_enabled_) {
+      const auto limits = node_->declare_parameter<std::vector<double>>(
+          "self_filter.box", std::vector<double>{});
+      if (limits.size() != 6 ||
+          !std::all_of(limits.begin(), limits.end(),
+                       [](double value) { return std::isfinite(value); }) ||
+          limits[0] >= limits[1] || limits[2] >= limits[3] ||
+          limits[4] >= limits[5]) {
+        throw std::invalid_argument("self_filter.box 需要有限且递增的 [xmin,xmax,ymin,ymax,zmin,zmax]");
+      }
+      self_filter_box_ = limits;
+    }
     rog_map::Config config;
     config.loadFromRosNode(node_, "rog_map");
     // 禁止同时启用原库订阅，所有数据必须先经过本适配器的坐标系和时间检查。
@@ -61,6 +76,9 @@ public:
           "odom 点云的 input_frame 必须等于 rog_map.frame_id");
     }
     map_ = std::make_unique<rog_map::ROGMapROS>(node_, config);
+    if (node_->declare_parameter<bool>("clearance.enabled", false)) {
+      clearance_ = std::make_unique<ClearanceObserver>(node_, *map_, frame_);
+    }
     query_ = std::dynamic_pointer_cast<rog_map::QueryAdapter>(
         map_->queryInterface());
     if (!query_) {
@@ -69,6 +87,8 @@ public:
     // 发布标准 OccupancyGrid；并非导航静态地图 /map，不提供 map->odom。
     grid_pub_ = node_->create_publisher<nav_msgs::msg::OccupancyGrid>(
         "/terrain/grid", rclcpp::QoS(1).reliable().durability_volatile());
+    structure_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/terrain/passage/structure", rclcpp::QoS(1).reliable().durability_volatile());
     mapping_scan_enabled_ =
         node_->declare_parameter<bool>("mapping_scan_enabled", false);
     if (mapping_scan_enabled_) {
@@ -196,6 +216,18 @@ private:
       }
       rog_map::PclPoint out;
       Eigen::Vector3d world(point.x, point.y, point.z);
+      // Remove known chassis returns before raycasting. The box is in the
+      // odometry/IMU body frame, not in map coordinates, and is disabled by
+      // default until the actual vehicle's own geometry is calibrated.
+      if (self_filter_enabled_) {
+        const Eigen::Vector3d local = cloud_coordinates_ == "imu"
+            ? world : rotation.conjugate() * (world - position);
+        if (local.x() >= self_filter_box_[0] && local.x() <= self_filter_box_[1] &&
+            local.y() >= self_filter_box_[2] && local.y() <= self_filter_box_[3] &&
+            local.z() >= self_filter_box_[4] && local.z() <= self_filter_box_[5]) {
+          continue;
+        }
+      }
       // 经源码核实：本仓库 /cloud_registered_body 已转到 IMU 系，虽然 header 写
       // livox_frame。 因此只乘 odom<-IMU 位姿，不能再应用一次雷达-IMU
       // 外参或通过这个错误标签查询 TF。 若改用 /cloud_registered，需显式选择
@@ -214,6 +246,7 @@ private:
       return;
     }
     map_->updateMap(points, super_utils::Pose(sensor_position, rotation));
+    if (clearance_) { clearance_->inputUpdated(stamp.seconds()); }
     const auto snapshot = query_->snapshot();
     if (!snapshot || snapshot->width <= 0 || snapshot->height <= 0 ||
         snapshot->values.size() !=
@@ -235,6 +268,9 @@ private:
       grid.data.push_back(toOccupancy(value));
     }
     grid_pub_->publish(grid);
+    if (const auto layer = map_->getProjectionLayer()) {
+      structure_pub_->publish(hollowStructureCloud(*layer, frame_, cloud->header.stamp));
+    }
     if (mapping_scan_enabled_) {
       // /Odometry 为 IMU 姿态；本车雷达外参旋转是单位矩阵，因此其 yaw 相同。
       // 扫描原点采用已经用于 ROGMap 射线更新的雷达位置，不用 odom 原点。
@@ -258,17 +294,21 @@ private:
 
   rclcpp::Node::SharedPtr node_;
   std::unique_ptr<rog_map::ROGMapROS> map_;
+  std::unique_ptr<ClearanceObserver> clearance_;
   std::shared_ptr<rog_map::QueryAdapter> query_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr structure_pub_;
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr mapping_scan_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::deque<nav_msgs::msg::Odometry::ConstSharedPtr> odoms_;
   sensor_msgs::msg::PointCloud2::ConstSharedPtr pending_cloud_;
   Eigen::Vector3d sensor_offset_;
+  std::vector<double> self_filter_box_;
   std::string frame_, input_frame_, cloud_coordinates_;
   double max_age_, max_delta_;
+  bool self_filter_enabled_{false};
   bool mapping_scan_enabled_{false};
   std::string mapping_scan_frame_;
   float mapping_scan_range_min_{0.48F}, mapping_scan_range_max_{4.5F};

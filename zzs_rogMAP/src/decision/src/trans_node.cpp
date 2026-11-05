@@ -82,7 +82,7 @@ public:
         // 保护代码
         try
         {
-            ser.setPort("/dev/ttyUSB0"); // 设置要打开的串口名称
+            ser.setPort("/dev/ttyACM0"); // 设置要打开的串口名称
             ser.setBaudrate(115200);     // 设置串口通信的波特率
             serial::Timeout to = serial::Timeout::simpleTimeout(1000);
             ser.setTimeout(to);

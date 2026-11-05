@@ -34,3 +34,10 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in);
 bool sync_packages(MeasureGroup &meas);
 
 // #endif
+#include "point_lio_input_guard.hpp"
+#include <chrono>
+extern point_lio::InputGuard input_guard;
+inline double input_steady_seconds() {
+  return std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+}

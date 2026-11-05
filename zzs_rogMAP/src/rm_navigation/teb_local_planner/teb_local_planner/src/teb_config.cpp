@@ -55,6 +55,13 @@ void TebConfig::declareParameters(const nav2_util::LifecycleNode::SharedPtr nh, 
   declare_parameter_if_not_declared(nh, name + "." + "min_samples", rclcpp::ParameterValue(trajectory.min_samples));
   declare_parameter_if_not_declared(nh, name + "." + "max_samples", rclcpp::ParameterValue(trajectory.max_samples));
   declare_parameter_if_not_declared(nh, name + "." + "global_plan_overwrite_orientation", rclcpp::ParameterValue(trajectory.global_plan_overwrite_orientation));
+  declare_parameter_if_not_declared(nh, name + "." + "follow_global_plan_orientation", rclcpp::ParameterValue(trajectory.follow_global_plan_orientation));
+  declare_parameter_if_not_declared(nh, name + "." + "shortest_rotation_initialization", rclcpp::ParameterValue(trajectory.shortest_rotation_initialization));
+  declare_parameter_if_not_declared(nh, name + ".goal_approach_enabled", rclcpp::ParameterValue(trajectory.goal_approach_enabled));
+  declare_parameter_if_not_declared(nh, name + ".translation_only", rclcpp::ParameterValue(trajectory.translation_only));
+  declare_parameter_if_not_declared(nh, name + ".goal_approach_distance", rclcpp::ParameterValue(trajectory.goal_approach_distance));
+  declare_parameter_if_not_declared(nh, name + ".goal_approach_max_speed", rclcpp::ParameterValue(trajectory.goal_approach_max_speed));
+  declare_parameter_if_not_declared(nh, name + "." + "global_plan_orientation_tolerance", rclcpp::ParameterValue(trajectory.global_plan_orientation_tolerance));
   declare_parameter_if_not_declared(nh, name + "." + "allow_init_with_backwards_motion", rclcpp::ParameterValue(trajectory.allow_init_with_backwards_motion));
   declare_parameter_if_not_declared(nh, name + "." + "global_plan_viapoint_sep", rclcpp::ParameterValue(trajectory.global_plan_viapoint_sep));
   declare_parameter_if_not_declared(nh, name + "." + "via_points_ordered", rclcpp::ParameterValue(trajectory.via_points_ordered));
@@ -182,6 +189,13 @@ void TebConfig::loadRosParamFromNodeHandle(const nav2_util::LifecycleNode::Share
   nh->get_parameter_or(name + "." + "min_samples", trajectory.min_samples, trajectory.min_samples);
   nh->get_parameter_or(name + "." + "max_samples", trajectory.max_samples, trajectory.max_samples);
   nh->get_parameter_or(name + "." + "global_plan_overwrite_orientation", trajectory.global_plan_overwrite_orientation, trajectory.global_plan_overwrite_orientation);
+  nh->get_parameter_or(name + "." + "follow_global_plan_orientation", trajectory.follow_global_plan_orientation, trajectory.follow_global_plan_orientation);
+  nh->get_parameter_or(name + "." + "shortest_rotation_initialization", trajectory.shortest_rotation_initialization, trajectory.shortest_rotation_initialization);
+  nh->get_parameter_or(name + ".goal_approach_enabled", trajectory.goal_approach_enabled, trajectory.goal_approach_enabled);
+  nh->get_parameter_or(name + ".translation_only", trajectory.translation_only, trajectory.translation_only);
+  nh->get_parameter_or(name + ".goal_approach_distance", trajectory.goal_approach_distance, trajectory.goal_approach_distance);
+  nh->get_parameter_or(name + ".goal_approach_max_speed", trajectory.goal_approach_max_speed, trajectory.goal_approach_max_speed);
+  nh->get_parameter_or(name + "." + "global_plan_orientation_tolerance", trajectory.global_plan_orientation_tolerance, trajectory.global_plan_orientation_tolerance);
   nh->get_parameter_or(name + "." + "allow_init_with_backwards_motion", trajectory.allow_init_with_backwards_motion, trajectory.allow_init_with_backwards_motion);
   nh->get_parameter_or(name + "." + "global_plan_viapoint_sep", trajectory.global_plan_viapoint_sep, trajectory.global_plan_viapoint_sep);
   nh->get_parameter_or(name + "." + "via_points_ordered", trajectory.via_points_ordered, trajectory.via_points_ordered);
@@ -439,12 +453,29 @@ rcl_interfaces::msg::SetParametersResult
   std::lock_guard<std::mutex> l(config_mutex_);
 
   bool reload_footprint = false;
+
+  // 先验证，避免同一批参数更新到一半才发现非法减速参数。
+  for (const auto& p : parameters) {
+    if (p.get_name() == node_name + ".goal_approach_distance" ||
+        p.get_name() == node_name + ".goal_approach_max_speed") {
+      if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE ||
+          !std::isfinite(p.as_double()) || p.as_double() <= 0) {
+        result.successful = false;
+        result.reason = "goal_approach_distance and goal_approach_max_speed must be finite positive doubles";
+        return result;
+      }
+    }
+  }
   
   for (auto parameter : parameters) {
     const auto & type = parameter.get_type();
     const auto & name = parameter.get_name();
 
     if (type == rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE) {
+      if (name == node_name + ".goal_approach_distance")
+        trajectory.goal_approach_distance = parameter.as_double();
+      if (name == node_name + ".goal_approach_max_speed")
+        trajectory.goal_approach_max_speed = parameter.as_double();
       // Trajectory
       if (name == node_name + ".teb_autosize") {
         trajectory.teb_autosize = parameter.as_double();
@@ -452,6 +483,13 @@ rcl_interfaces::msg::SetParametersResult
         trajectory.dt_ref = parameter.as_double();
       } else if (name == node_name + ".dt_hysteresis") {
         trajectory.dt_hysteresis = parameter.as_double();
+      } else if (name == node_name + ".global_plan_orientation_tolerance") {
+        if (parameter.as_double() <= 0.0 || parameter.as_double() > M_PI) {
+          result.successful = false;
+          result.reason = "global_plan_orientation_tolerance must be in (0, pi]";
+          return result;
+        }
+        trajectory.global_plan_orientation_tolerance = parameter.as_double();
       } else if (name == node_name + ".global_plan_viapoint_sep") {
         trajectory.global_plan_viapoint_sep = parameter.as_double();
       } else if (name == node_name + ".max_global_plan_lookahead_dist") {
@@ -669,6 +707,14 @@ rcl_interfaces::msg::SetParametersResult
       // Trajectory
       if (name == node_name + ".global_plan_overwrite_orientation") {
         trajectory.global_plan_overwrite_orientation = parameter.as_bool();
+      } else if (name == node_name + ".follow_global_plan_orientation") {
+        trajectory.follow_global_plan_orientation = parameter.as_bool();
+      } else if (name == node_name + ".shortest_rotation_initialization") {
+        trajectory.shortest_rotation_initialization = parameter.as_bool();
+      } else if (name == node_name + ".goal_approach_enabled") {
+        trajectory.goal_approach_enabled = parameter.as_bool();
+      } else if (name == node_name + ".translation_only") {
+        trajectory.translation_only = parameter.as_bool();
       } else if (name == node_name + ".allow_init_with_backwards_motion") {
         trajectory.allow_init_with_backwards_motion = parameter.as_bool();
       } else if (name == node_name + ".via_points_ordered") {
@@ -805,6 +851,10 @@ rcl_interfaces::msg::SetParametersResult
 void TebConfig::checkParameters() const
 {
   //rclcpp::Logger logger_{rclcpp::get_logger("TEBLocalPlanner")};
+  if (trajectory.follow_global_plan_orientation &&
+      (trajectory.global_plan_orientation_tolerance <= 0.0 ||
+       trajectory.global_plan_orientation_tolerance > M_PI))
+    RCLCPP_WARN(logger_, "TebLocalPlannerROS() Param Warning: global_plan_orientation_tolerance must be in (0, pi].");
   // positive backward velocity?
   if (robot.max_vel_x_backwards <= 0)
     RCLCPP_WARN(logger_, "TebLocalPlannerROS() Param Warning: Do not choose max_vel_x_backwards to be <=0. Disable backwards driving by increasing the optimization weight for penalyzing backwards driving.");

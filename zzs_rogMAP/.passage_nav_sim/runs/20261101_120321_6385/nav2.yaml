@@ -1,0 +1,412 @@
+amcl:
+  ros__parameters:
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    base_frame_id: base_link
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: map
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 100.0
+    laser_min_range: -1.0
+    laser_model_type: likelihood_field
+    max_beams: 60
+    max_particles: 2000
+    min_particles: 500
+    odom_frame_id: odom
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    robot_model_type: nav2_amcl::OmniMotionModel
+    save_pose_rate: 0.5
+    scan_topic: scan
+    sigma_hit: 0.2
+    tf_broadcast: true
+    transform_tolerance: 1.0
+    update_min_a: 0.2
+    update_min_d: 0.25
+    use_sim_time: true
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+amcl_map_client:
+  ros__parameters:
+    use_sim_time: true
+amcl_rclcpp_node:
+  ros__parameters:
+    use_sim_time: true
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    global_frame: map
+    robot_base_frame: base_link
+    use_sim_time: true
+bt_navigator:
+  ros__parameters:
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    global_frame: map
+    odom_topic: /passage_sim/base_odom
+    plugin_lib_names:
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_compute_path_through_poses_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_distance_traveled_condition_bt_node
+    - nav2_single_trigger_bt_node
+    - nav2_is_battery_low_condition_bt_node
+    - nav2_navigate_through_poses_action_bt_node
+    - nav2_navigate_to_pose_action_bt_node
+    - nav2_remove_passed_goals_action_bt_node
+    - nav2_planner_selector_bt_node
+    - nav2_controller_selector_bt_node
+    - nav2_goal_checker_selector_bt_node
+    robot_base_frame: base_link
+    use_sim_time: true
+controller_server:
+  ros__parameters:
+    FollowPath:
+      acc_lim_theta: 1.8
+      acc_lim_x: 1.8
+      acc_lim_y: 1.8
+      allow_init_with_backwards_motion: true
+      cmd_angle_instead_rotvel: false
+      costmap_obstacles_behind_robot_dist: 2.5
+      delete_detours_backwards: true
+      dt_hysteresis: 0.1
+      dt_ref: 0.4
+      dynamic_obstacle_inflation_dist: 0.5
+      enable_homotopy_class_planning: false
+      enable_multithreading: true
+      exact_arc_length: false
+      feasibility_check_lookahead_distance: -1.0
+      feasibility_check_no_poses: -1
+      follow_global_plan_orientation: false
+      footprint_model:
+        type: polygon
+        vertices: '[[-0.32, -0.29], [0.30, -0.29], [0.30, 0.29], [-0.32, 0.29]]'
+      force_reinit_new_goal_angular: 0.78
+      force_reinit_new_goal_dist: 1.0
+      free_goal_vel: false
+      global_plan_orientation_tolerance: 0.1
+      global_plan_overwrite_orientation: true
+      global_plan_viapoint_sep: 0.1
+      goal_approach_distance: 1.0
+      goal_approach_enabled: true
+      goal_approach_max_speed: 1.0
+      h_signature_prescaler: 0.5
+      h_signature_threshold: 0.1
+      include_costmap_obstacles: true
+      include_dynamic_obstacles: true
+      inflation_dist: 0.1
+      is_footprint_dynamic: false
+      legacy_obstacle_association: false
+      max_global_plan_lookahead_dist: 2.0
+      max_number_classes: 3
+      max_ratio_detours_duration_best_duration: 3.0
+      max_samples: 500
+      max_vel_theta: 1.8
+      max_vel_x: 1.0
+      max_vel_x_backwards: 1.0
+      max_vel_y: 2.5
+      min_obstacle_dist: 0.02
+      min_resolution_collision_check_angular: 0.0017453292519943296
+      min_turning_radius: 0.0
+      no_inner_iterations: 5
+      no_outer_iterations: 4
+      obstacle_cost_exponent: 4.0
+      obstacle_heading_threshold: 0.45
+      obstacle_poses_affected: 15
+      obstacle_proximity_lower_bound: 1.0
+      obstacle_proximity_ratio_max_vel: 1.0
+      obstacle_proximity_upper_bound: 0.5
+      optimization_activate: true
+      optimization_verbose: false
+      oscillation_filter_duration: 10.0
+      oscillation_omega_eps: 0.1
+      oscillation_recovery: true
+      oscillation_recovery_min_duration: 10.0
+      oscillation_v_eps: 0.1
+      penalty_epsilon: 0.01
+      plugin: teb_local_planner::TebLocalPlannerROS
+      publish_feedback: false
+      roadmap_graph_area_length_scale: 1.0
+      roadmap_graph_area_width: 5.0
+      roadmap_graph_no_samples: 15
+      selection_alternative_time_cost: true
+      selection_cost_hysteresis: 1.0
+      selection_obst_cost_scale: 1.0
+      selection_prefer_initial_plan: 1.0
+      shortest_rotation_initialization: true
+      shrink_horizon_backup: true
+      shrink_horizon_min_duration: 10.0
+      switching_blocking_period: 0.0
+      teb_autosize: 1.0
+      transform_tolerance: 0.5
+      translation_only: true
+      use_proportional_saturation: false
+      via_points_ordered: false
+      viapoints_all_candidates: true
+      visualize_hc_graph: false
+      visualize_with_time_as_z_axis_scale: 0.0
+      weight_acc_lim_theta: 1.0
+      weight_acc_lim_x: 1.0
+      weight_acc_lim_y: 1.0
+      weight_adapt_factor: 2.0
+      weight_dynamic_obstacle: 10.0
+      weight_dynamic_obstacle_inflation: 0.2
+      weight_inflation: 0.8
+      weight_kinematics_forward_drive: 0.0
+      weight_kinematics_nh: 0.0
+      weight_kinematics_turning_radius: 0.1
+      weight_max_vel_theta: 2.0
+      weight_max_vel_x: 2.0
+      weight_max_vel_y: 2.0
+      weight_obstacle: 100.0
+      weight_optimaltime: 0.1
+      weight_shortest_path: 2.0
+      weight_viapoint: 1.0
+      wheelbase: 1.0
+    controller_frequency: 40.0
+    controller_plugins:
+    - FollowPath
+    failure_tolerance: 0.3
+    general_goal_checker:
+      plugin: nav2_controller::SimpleGoalChecker
+      stateful: true
+      xy_goal_tolerance: 0.2
+      yaw_goal_tolerance: 6.28
+    goal_checker_plugins:
+    - general_goal_checker
+    min_theta_velocity_threshold: 0.001
+    min_x_velocity_threshold: 0.01
+    min_y_velocity_threshold: 0.1
+    odom_topic: /passage_sim/base_odom
+    progress_checker:
+      movement_time_allowance: 180.0
+      plugin: nav2_controller::SimpleProgressChecker
+      required_movement_radius: 0.5
+    progress_checker_plugin: progress_checker
+    use_sim_time: true
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      always_send_full_costmap: true
+      footprint: '[[-0.32, -0.29], [0.30, -0.29], [0.30, 0.29], [-0.32, 0.29]]'
+      footprint_padding: 0.0
+      global_frame: map
+      inflation_layer:
+        cost_scaling_factor: 7.0
+        inflation_radius: 0.35
+        plugin: nav2_costmap_2d::InflationLayer
+      plugins:
+      - static_layer
+      - terrain_layer
+      - inflation_layer
+      publish_frequency: 2.0
+      resolution: 0.02
+      robot_base_frame: base_link
+      static_layer:
+        footprint_clearing_enabled: false
+        map_subscribe_transient_local: true
+        map_topic: /map
+        plugin: nav2_costmap_2d::StaticLayer
+      stvl_layer:
+        combination_method: 1
+        decay_model: 0
+        enabled: false
+        livox_clear:
+          clearing: true
+          data_type: PointCloud2
+          decay_acceleration: 5.0
+          enabled: true
+          horizontal_fov_angle: 6.29
+          marking: false
+          max_z: 8.0
+          min_z: 1.0
+          model_type: 1
+          topic: /segmentation/obstacle
+          vertical_fov_angle: 1.029
+          vertical_fov_padding: 0.05
+        livox_mark:
+          clear_after_reading: true
+          clearing: false
+          data_type: PointCloud2
+          expected_update_rate: 0.0
+          filter: voxel
+          inf_is_valid: false
+          marking: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.38
+          observation_persistence: 0.0
+          obstacle_range: 3.0
+          topic: /segmentation/obstacle
+          voxel_min_points: 0
+        map_save_duration: 60.0
+        mapping_mode: false
+        mark_threshold: 0
+        observation_sources: livox_mark livox_clear
+        origin_z: 0.0
+        plugin: spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer
+        publish_voxel_map: true
+        track_unknown_space: true
+        transform_tolerance: 0.2
+        update_footprint_enabled: true
+        voxel_decay: 0.5
+        voxel_size: 0.05
+      terrain_layer:
+        data_timeout: 1.5
+        enabled: true
+        marking_only: true
+        plugin: sentry_terrain_bridge::TerrainLayer
+        topic: /terrain/grid
+      track_unknown_space: true
+      update_frequency: 5.0
+      use_sim_time: true
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      always_send_full_costmap: true
+      footprint: '[[-0.32, -0.29], [0.30, -0.29], [0.30, 0.29], [-0.32, 0.29]]'
+      footprint_padding: 0.0
+      global_frame: map
+      height: 5
+      inflation_layer:
+        cost_scaling_factor: 3.5
+        inflation_radius: 0.3
+        plugin: nav2_costmap_2d::InflationLayer
+      obstacle_layer:
+        enabled: true
+        footprint_clearing_enabled: true
+        observation_sources: scan
+        plugin: nav2_costmap_2d::ObstacleLayer
+        scan:
+          clearing: true
+          data_type: LaserScan
+          inf_is_valid: true
+          marking: true
+          max_obstacle_height: 2.0
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.1
+          raytrace_max_range: 6.0
+          topic: /scan
+      plugins:
+      - static_layer
+      - terrain_layer
+      - inflation_layer
+      publish_frequency: 10.0
+      resolution: 0.02
+      robot_base_frame: base_link
+      rolling_window: true
+      static_layer:
+        footprint_clearing_enabled: false
+        map_subscribe_transient_local: true
+        map_topic: /map
+        plugin: nav2_costmap_2d::StaticLayer
+      terrain_layer:
+        data_timeout: 1.5
+        enabled: true
+        marking_only: true
+        plugin: sentry_terrain_bridge::TerrainLayer
+        topic: /terrain/grid
+      update_frequency: 40.0
+      use_sim_time: true
+      width: 5
+map_saver:
+  ros__parameters:
+    free_thresh_default: 0.25
+    map_subscribe_transient_local: true
+    occupied_thresh_default: 0.65
+    save_map_timeout: 5.0
+    use_sim_time: true
+map_server:
+  ros__parameters:
+    use_sim_time: true
+    yaml_filename: ''
+planner_server:
+  ros__parameters:
+    GridBased:
+      allow_unknown: true
+      plugin: nav2_navfn_planner/NavfnPlanner
+      tolerance: 0.0
+      use_astar: false
+    expected_planner_frequency: 5.0
+    planner_plugins:
+    - GridBased
+    use_sim_time: true
+recoveries_server:
+  ros__parameters:
+    backup:
+      plugin: nav2_recoveries/BackUp
+    costmap_topic: local_costmap/costmap_raw
+    cycle_frequency: 2.0
+    footprint_topic: local_costmap/published_footprint
+    global_frame: odom
+    max_rotational_vel: 3.0
+    min_rotational_vel: 0.4
+    recovery_plugins:
+    - spin
+    - backup
+    robot_base_frame: base_link
+    rotational_acc_lim: 3.0
+    simulate_ahead_time: 1.0
+    spin:
+      plugin: nav2_recoveries/Spin
+    transform_timeout: 0.1
+    use_sim_time: true
+velocity_smoother:
+  ros__parameters:
+    deadband_velocity:
+    - 0.0
+    - 0.0
+    - 0.0
+    feedback: OPEN_LOOP
+    max_accel:
+    - 1.8
+    - 1.8
+    - 3.0
+    max_decel:
+    - -1.8
+    - -1.8
+    - -6.0
+    max_velocity:
+    - 1.0
+    - 1.0
+    - 1.0
+    min_velocity:
+    - -1.0
+    - -1.0
+    - -1.0
+    odom_duration: 0.1
+    odom_topic: /passage_sim/base_odom
+    scale_velocities: false
+    smoothing_frequency: 40.0
+    velocity_timeout: 1.0

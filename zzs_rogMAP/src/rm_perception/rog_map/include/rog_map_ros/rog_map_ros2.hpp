@@ -27,6 +27,7 @@
 
 #ifndef ROG_MAP_ROS_HPP
 #define ROG_MAP_ROS_HPP
+#include <rog_map/projection_reason_markers.hpp>
 
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
@@ -327,6 +328,9 @@ class ROGMapROS : public ROGMap
     }
 
     if (layer_ && !layer_->empty()) {
+      if (vm_.reason_pub && vm_.reason_pub->get_subscription_count() >= 1) {
+        vm_.reason_pub->publish(projectionReasonMarkers(*layer_, cfg_.visualization_frame_id, now()));
+      }
       if (vm_.layer_value_pub && vm_.layer_value_pub->get_subscription_count() >= 1) {
         nav_msgs::msg::OccupancyGrid grid;
         fillLayerMaskGrid(fused_projection_mask_, grid);
@@ -536,7 +540,8 @@ class ROGMapROS : public ROGMap
 
   bool hasVisualizationSubscriber()
   {
-    return (vm_.unknown_pub && vm_.unknown_pub->get_subscription_count() >= 1) ||
+    return (vm_.reason_pub && vm_.reason_pub->get_subscription_count() >= 1) ||
+           (vm_.unknown_pub && vm_.unknown_pub->get_subscription_count() >= 1) ||
            (vm_.unknown_inf_pub && vm_.unknown_inf_pub->get_subscription_count() >= 1) ||
            (vm_.layer_value_pub && vm_.layer_value_pub->get_subscription_count() >= 1) ||
            (vm_.layer_value_dynamic_pub &&
@@ -733,6 +738,7 @@ class ROGMapROS : public ROGMap
       vm_.layer_value_dynamic_pub = pubs.layer_value_dynamic_pub;
       vm_.layer_value_static_pub = pubs.layer_value_static_pub;
       vm_.layer_type_pub = pubs.layer_type_pub;
+      vm_.reason_pub = pubs.reason_pub;
       vm_.layer_confidence_pub = pubs.layer_confidence_pub;
       vm_.mkr_arr_pub = pubs.mkr_arr_pub;
     }

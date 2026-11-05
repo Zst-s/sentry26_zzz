@@ -1,0 +1,73 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: nav2_rviz_plugins/Navigation 2
+    Name: Navigation 2
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 20
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+    - Class: rviz_default_plugins/Map
+      Name: Static Map
+      Enabled: true
+      Topic:
+        Value: /map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Map
+      Name: Global Costmap
+      Enabled: true
+      Alpha: 0.65
+      Topic:
+        Value: /global_costmap/costmap
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Path
+      Name: Global Plan
+      Enabled: true
+      Topic:
+        Value: /plan
+    - Class: rviz_default_plugins/Path
+      Name: TEB Local Plan
+      Enabled: true
+      Topic:
+        Value: /local_plan
+    - Class: rviz_default_plugins/Polygon
+      Name: True Footprint
+      Enabled: true
+      Topic:
+        Value: /local_costmap/published_footprint
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Simulated LiDAR
+      Enabled: true
+      Size (m): 0.025
+      Topic:
+        Value: /passage_sim/points
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/Map
+      Name: ROGMap Terrain
+      Enabled: false
+      Topic:
+        Value: /terrain/grid
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: nav2_rviz_plugins/GoalTool
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 80
+      X: 2.0
+      Y: 0.0
+Window Geometry:
+  Width: 1280
+  Height: 800

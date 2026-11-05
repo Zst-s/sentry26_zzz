@@ -12,10 +12,10 @@
 |Livox 驱动|保留本车驱动/IP，不复制来源双雷达配置|
 |SLAM Toolbox / AMCL / ICP / map_server|保留；地图路径和选择规则不变|
 |Navfn / TEB / 速度平滑 / 串口 / decision|保留源码和参数；不添加速度发布者|
-|linefit / pointcloud_to_laserscan|导航定位以及 `shadow`、`legacy` 建图继续使用；`rog_map` 建图时停用|
+|linefit / pointcloud_to_laserscan|导航定位及三种建图模式均继续生成原 `/scan`；ROGMap 不接管 SLAM 输入|
 |`msg_convert` / DBSCAN / 双雷达标定|不复制未启用的实验流程和双雷达工具；ROGMap 自带裁剪功能暂关闭|
 
-注意：这不是把旧感知相关目录全部删除。导航定位仍保留原 `/scan`，因为现有 AMCL 和 SLAM Toolbox 定位配置尚未切到 ROGMap。建图模式的输入已单独改为 `/rog_map/scan`；全局位姿图和 `/map` 仍由 SLAM Toolbox 负责，不要把 ROGMap 的局部 `/terrain/grid` 误认为可保存的全局图。
+注意：这不是把旧感知相关目录全部删除。导航定位和建图都保留原 `/scan`；全局位姿图和 `/map` 仍由 SLAM Toolbox 负责。不要把 ROGMap 的局部 `/terrain/grid` 误认为可保存的全局图。
 
 ## 数据链路与坐标
 
@@ -30,15 +30,15 @@
                         Nav2 TerrainLayer → 原 Navfn / TEB
 ```
 
-`mode:=mapping perception:=rog_map` 时另有一条建图链路：
+目前实车建图仍使用原扫描链路：
 
 ```text
-ROGMap /terrain/grid（局部）→ 从雷达当前位置逐束射线投影
-                            → /rog_map/scan（LaserScan）
-                            → SLAM Toolbox → /map、位姿图、map→odom
+原点云 → linefit → /segmentation/obstacle
+                   → pointcloud_to_laserscan → /scan
+                   → SLAM Toolbox → /map、位姿图、map→odom
 ```
 
-在这个组合下，旧 linefit 与 pointcloud_to_laserscan 不启动；`shadow`、`legacy` 建图仍使用旧 `/scan`。新扫描只把明确分类为障碍的体素列变成量测终点；未知格子给 NaN，不把未知伪装成自由空间。扫描来自局部滚动栅格而非单帧原始回波，因此它不是独立的全局 SLAM，也不保证墙上每个入口一定能被识别。必须在 NUC 静止和低速条件下核验时间、TF、入口两侧墙体与中间间隙，再决定是否用它保存正式地图。
+ROGMap 的局部地形与三维净空结果供旁路分析和后续导航融合使用；当前 launch 强制 `mapping_scan_enabled: false`，不要期待 `/rog_map/scan` 存在。正式地图仍需核验 `/scan`、TF、入口两侧墙体与中间间隙。
 
 经核对本仓库 `publish_frame_body()`：FAST-LIO 的 body 点云已经应用雷达到 IMU 的外参，**数值在 IMU 系，但原消息 header 写的是 `livox_frame`**。适配器显式区分 `cloud_coordinates: imu`，用 `/Odometry` 的 IMU 位姿变换一次，不再乘雷达外参，也不通过这个标签再查一次 TF。雷达射线起点单独使用 `p_imu + R_imu * extrinsic_T`。外参由 launch 从所选 LIO 配置读取。
 
@@ -51,7 +51,7 @@ ROGMap /terrain/grid（局部）→ 从雷达当前位置逐束射线投影
 以下示例需要在运行设备上先编译并 source 新安装目录。本次只完成了当前机器上的隔离构建和单元测试，没有运行实车 launch 或启动串口。使用你自己的地图名称，示例中的 `my_map11` 不代表地图已经核验。
 
 ```bash
-cd /home/zst/zzs  # 当前电脑上的目录；NUC 上按实际工作区路径替换。
+cd ~/zzs_rogMAP  # NUC 上按实际工作区路径替换。
 source install/setup.bash
 
 # 建议第一次先旁路比较：原避障工作，新算法仅发布地形供观察。
@@ -74,11 +74,51 @@ ros2 launch rm_nav_bringup bringup_real.launch.py mode:=nav world:=my_map11 lio:
 
 ```bash
 ros2 launch rm_nav_bringup bringup_real.launch.py mode:=mapping lio:=fastlio perception:=rog_map
-ros2 topic hz /rog_map/scan
+ros2 topic hz /scan
 ros2 param get /slam_toolbox scan_topic
 ```
 
-最后一条应返回 `/rog_map/scan`。RViz 分别显示 `/terrain/grid`、`/rog_map/scan`、`/map`，重点观察入口两侧墙点及中间空隙。若新扫描漏墙或 TF 不通，改用 `perception:=legacy` 回到原建图输入，不要在未确认时直接保存并用于实车导航。
+最后一条应返回 `/scan`。RViz 分别显示 `/terrain/grid`、`/scan`、`/map`，重点观察入口两侧墙点及中间空隙。若扫描漏墙或 TF 不通，不要在未确认时直接保存并用于实车导航。
+
+### 实车只读净空观察（默认关闭）
+
+在现有启动命令末尾加 `passage_observer:=true`，例如 `mode:=mapping perception:=shadow lio:=fastlio passage_observer:=true`。这让 ROGMap 记录直接观测时间并发布 `/terrain/clearance/status` 和 `/terrain/clearance/markers`。当前实车启动仍针对高约 0.70 m、机械上不能过洞的老车；此观察仅用于感知诊断，**强制不发布已验证通道证据、不修正静态地图、不发通行许可或速度**，绝不让老车试穿。新车目标高度 0.32 m 记录在 `vehicle_geometry_new_pending.yaml`，雷达和 `base_link` 未标定前不能用其进行实车净空放行。先禁止自主运动，在洞口外静止采样。
+
+若现在只想用老车雷达**预览一台高 0.32 m 的虚拟车**能否被 ROGMap 识别为可穿洞，启动时改用 `passage_virtual_preview:=true`（`passage_observer` 可省略）。打开 `rog_map_debug.rviz` 后看 `Virtual 0.32m Tunnel Probe (visual only)`，再按下文向 `/terrain/clearance/probe` 发送探针。绿色仅表示该虚拟尺寸的短段净空证据达到确认次数；红色、青色、品红色分别帮助查看未通过、内部未知和地面支撑缺失。`/terrain/clearance/status` 会以 `VIRTUAL_BODY_PREVIEW_ONLY` 开头并显示所用车高。这个预览**不会改变 `/map` 或 Nav2 Costmap，也不发布 `/terrain/clearance/verified_segment`，更不会让老车获得通行许可**。雷达仍装在老车上，视角不同于将来的新车，结果只能用来检查算法链路，不能据此推断新车最终可过洞。
+
+这里说的“不改变 Nav2 Costmap”指**实车正式导航的 Costmap**。现在可另启 `sentry_passage_fusion_test/live_virtual_preview.launch.py`，在隔离 Costmap 中显示虚拟证据的开洞效果；该独立视图仍不发通行许可或速度。
+
+对确定的短段中心发一个探针；`x/y` 是 `odom` 坐标，`z` 必须填写实测地面在 `odom` 中的高度，不能用地面分割的 `sensor_height` 或 `base_link` 的 z 值代替。朝向零度表示沿 `odom` 的 +X 方向。下面的 `GROUND_Z` 要先由现场测量后填入：
+
+```bash
+read -r -p '请输入实测地面在 odom 中的 z（米）: ' GROUND_Z
+ros2 topic pub --once /terrain/clearance/probe geometry_msgs/msg/PoseStamped \
+  "{header: {stamp: now, frame_id: odom}, pose: {position: {x: 1.0, y: 0.0, z: ${GROUND_Z}}, orientation: {w: 1.0}}}"
+ros2 topic echo /terrain/clearance/status
+```
+
+记录 `reason`、`body_recent_by_slice`、`support_recent_by_slice`、`entry_edge_recent`，再从入口左右安全位置重复观察同一探针。`confirmed=3/3` 只是短段结构证据，**不是准许进洞**。观察不全、离开局部地图、TF 变化或地面高度选错都需要分别分析；不要通过放低验证门限让实车冒险通行。若启动后该话题不存在，先确认 `ros2 param get /sentry_terrain clearance.enabled` 为 `True`，以及使用的是重新编译并 source 后的工作空间。
+
+在 NUC 上检查各环节是否有新数据，可在已启动上述观察模式的另一个终端运行（按实际工作空间路径 source）：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run sentry_terrain_bridge real_passage_diagnostics --lio fastlio --seconds 8
+```
+
+它只订阅原始雷达点云、地面分割结果、LIO 点云、里程计、`/scan`、`/terrain/grid`、`/map`、净空状态并查询 TF；打印 `OK`、`MISSING` 或 `STALE`，不发速度也不修改地图。若实际运行 Point-LIO，改用 `--lio pointlio`。请保留这段完整输出，特别是 `ground_z_median_in_cloud_frame`、`raw_z_lower_decile_in_cloud_frame` 和最后三条 TF。前两个 z 统计只用 0.7–4 m 范围内采样点作粗查；地面分割输出本身受现有 `sensor_height` 影响，不能单凭其结果反证参数正确。`measurement_params_real.yaml` 中的 `z=0.622` 是未被 xacro 使用的旧记录；URDF 固定写着雷达相对 `base_link` 的 `z=0.25 m`。用户描述老车 `base_link` 离地约 `0.23 m`、雷达再高约 `0.22 m`，两者相加约 `0.45 m`。地面分割源码中的 `sensor_height` 表示**雷达离地高度**，当前配置却是 `0.22 m`；这与上述尺寸不符，必须量取并核对原始点云地面 z 后才能改。新车的安装位置与 `base_link` 尚未确定，不能沿用老车的 TF、分割高度或 LIO 标定。
+
+需要离线复盘时，在 NUC 上另外开一个终端，短时记录下面这些原始输入和验证结果；从洞口正前方、左侧、右侧各观察一段后按 Ctrl+C 正常结束录制。点云占用磁盘较快，先检查剩余空间。该记录不控制底盘。
+
+```bash
+ros2 bag record -o passage_probe_run \
+  /cloud_registered_body /cloud_registered /Odometry \
+  /terrain/clearance/probe /terrain/clearance/status \
+  /terrain/grid /scan /tf /tf_static
+```
+
+FAST-LIO 主要回放 `/cloud_registered_body`，旧 Point-LIO 分支回放 `/cloud_registered`；如果某个话题在当前 LIO 模式下不存在，录包工具会等待它，不影响其他已有话题。将录包、当次 `rog_map_real.yaml`、LIO 配置和地面 Z 测量值一同保存，才能区分雷达遮挡、时间同步、坐标和参数问题。
 
 RViz 的 Fixed Frame 使用现有的 `map`（TF 正常时）或用 `odom` 单独看感知。添加 Map 显示，Topic 选 `/terrain/grid`，Durability 用 Volatile。不要把这个话题替换成定位用的 `/map`。
 
@@ -111,7 +151,7 @@ ros2 run tf2_ros tf2_echo map odom
 ## 验证与构建边界
 
 ```bash
-python3 src/rm_perception/sentry_terrain_bridge/test/check_configuration.py /home/zst/zzs
+python3 src/rm_perception/sentry_terrain_bridge/test/check_configuration.py ~/zzs_rogMAP
 ```
 
-这是只读静态检查。本次在当前机器的 `/tmp` 隔离目录完成 `rog_map`、`sentry_terrain_bridge`、`rm_nav_bringup` 构建，新增的扫描投影单元测试通过；没有覆盖工作区现有 build/install/log，也没有在 NUC 上运行。仍需在 NUC 编译并测试消息、TF、入口分类、停止响应后，才能判定新建图输入可用于正式建图或实车导航。
+这是只读静态检查。实车只读观察开关已在本地临时目录构建并通过净空验证单元测试，但还没有在 NUC 上测量真实雷达覆盖、TF、CPU 负载及入口观测；不能据此启用自动静态清障或实车穿洞。

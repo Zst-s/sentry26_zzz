@@ -3,6 +3,7 @@
 
 // std
 #include <filesystem>
+#include <chrono>
 #include <mutex>
 
 // ros
@@ -39,8 +40,7 @@ private:
 
   static PointCloudXYZIN::Ptr addNorm(PointCloudXYZI::Ptr cloud);
 
-  // Eigen::Matrix4d align(PointCloudXYZI::Ptr source,
-  //                       const Eigen::Matrix4d &init_guess);
+  void tryInitialize();
 
   Eigen::Matrix4d multiAlignSync(PointCloudXYZI::Ptr source,
                                  const Eigen::Matrix4d &init_guess);
@@ -74,7 +74,7 @@ private:
   PointCloudXYZIN::Ptr rough_map_;
   geometry_msgs::msg::TransformStamped map_to_odom_;
   std::filesystem::path pcd_path_;
-  std::string map_frame_id_, odom_frame_id_, range_odom_frame_id_, laser_frame_id_;
+  std::string map_frame_id_, odom_frame_id_, range_odom_frame_id_, laser_frame_id_, base_frame_id_;
   bool success_;
   double score_;
   double thresh_;
@@ -85,6 +85,8 @@ private:
 
   bool is_ready_;
   bool first_scan_;
+  rclcpp::Time cloud_stamp_{0, 0, RCL_ROS_TIME};
+  std::chrono::steady_clock::time_point last_attempt_{};
 };
 } // namespace icp
 #endif

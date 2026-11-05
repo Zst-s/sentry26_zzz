@@ -30,6 +30,7 @@
 #include <algorithm>
 
 #include "lds.h"
+#include "comm/timestamp_policy.h"
 #include "comm/ldq.h"
 
 namespace livox_ros {
@@ -113,6 +114,7 @@ void Lds::StorageImuData(ImuData* imu_data) {
   }
 
   LidarDevice *p_lidar = &lidars_[index];
+  if (p_lidar->connect_state != kConnectStateSampling) return;
   LidarImuDataQueue* imu_queue = &p_lidar->imu_data;
   imu_queue->Push(imu_data);
   if (!imu_queue->Empty()) {
@@ -170,6 +172,23 @@ void Lds::StoragePointData(PointFrame* frame) {
 void Lds::PushLidarData(PointPacket* lidar_data, const uint8_t index, const uint64_t base_time) {
   if (lidar_data == nullptr) {
     return;
+  }
+
+  // Do not retain startup data that the distributor cannot consume yet.
+  if (lidars_[index].connect_state != kConnectStateSampling) return;
+
+  // All output formats must see the same valid frame, before any uint32 cast.
+  const uint64_t max_span = static_cast<uint64_t>(2e9 / publish_freq_);
+  uint32_t offset = 0;
+  if (lidar_data->points_num == 0 || lidar_data->points == nullptr) return;
+  for (uint32_t i = 0; i < lidar_data->points_num; ++i) {
+    if (!relativePointTime(lidar_data->points[i].offset_time, base_time,
+                           max_span, offset)) {
+      fprintf(stderr, "Dropped invalid LiDAR time span: handle=%u base=%llu point=%llu\n",
+              lidar_data->handle, (unsigned long long)base_time,
+              (unsigned long long)lidar_data->points[i].offset_time);
+      return;
+    }
   }
 
   LidarDevice *p_lidar = &lidars_[index];

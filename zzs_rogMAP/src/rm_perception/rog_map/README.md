@@ -3,7 +3,7 @@
 > 为高速局部规划定制的滚动占据地图：接收 Point-LIO 稠密点云，维护概率占据、语义投影层与有符号 ESDF，并向 MincoPlanner 提供低延迟进程内查询。
 
 [返回项目主页](../../../README.md) · [Point-LIO](../Point-LIO/README.md) · [MINCO Planner](../../navigation/minco_planner/README.md)
-
+                                               
 ## ✨ 模块定位
 
 本仓库中的 ROGMap 不是独立地图节点：`MincoPlanner` 插件在配置阶段创建地图实例，并获取 `MapQueryInterface` 指针。地图仍通过 ROS 2 接收点云与里程计、发布可视化，但规划搜索、轨迹优化与安全检查可以直接查询内存中的地图状态。
@@ -18,7 +18,7 @@
 - SensorData QoS `keep_last(1)` 接收最新稠密点云。
 - 地图更新、投影、ESDF 与可视化频率可独立控制。
 
-## 🧠 模块流程图
+## 🧠 模块流程图    
 
 ```mermaid
 flowchart LR

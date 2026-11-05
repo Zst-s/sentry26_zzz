@@ -1,0 +1,117 @@
+sentry_terrain:
+  ros__parameters:
+    clearance:
+      confirmations: 3
+      enabled: false
+      max_observation_age: 60.0
+      publish_verified_segments: true
+      robot_height: 0.32
+      robot_length: 0.45
+      robot_width: 0.45
+      travel_length: 0.2
+    cloud_coordinates: imu
+    cloud_topic: /passage_sim/body_points
+    input_frame: base_link
+    mapping_scan_enabled: false
+    max_cloud_odom_dt: 0.1
+    max_input_age: 0.5
+    odom_topic: /passage_sim/base_odom
+    rog_map:
+      cloud_filter:
+        enable: false
+      decay:
+        active_list_enable: true
+        clear_time: 3.0
+        enable: true
+        keep_time: 1.0
+      esdf:
+        enable: false
+      field:
+        enable: false
+      fix_map_origin:
+      - 0.0
+      - 0.0
+      - 0.0
+      frame_id: world
+      inflation_resolution: 0.1
+      intensity_thresh: -1
+      load_pcd_en: false
+      map_size:
+      - 12.0
+      - 12.0
+      - 4.0
+      map_sliding:
+        center_offset_enable: false
+        enable: true
+        threshold: 0.2
+      performance:
+        detailed_csv_enable: false
+        dirty_column_enable: true
+        enable: false
+        print_enable: false
+        summary_csv_enable: false
+      point_filt_num: 1
+      projection:
+        enable: true
+        hysteresis_enable: false
+        mask_filter_en: false
+        min_observed_voxels: 2
+        obstacle_hold_time: 1.0
+        passable_as_free: true
+        passable_cost: 50
+        prior_map:
+          enable: false
+        scan_z_max_abs: 1.6
+        scan_z_min_abs: 0.15
+        surface_height_delta_max: 0.15
+        tunnel_height_delta_max: 1.3
+        tunnel_height_delta_min: 0.3
+        tunnel_occupancy_ratio_max: 0.6
+        unknown_as_occupied: false
+        wall_height_delta_min: 0.5
+        wall_occupancy_ratio_min: 0.8
+      raycasting:
+        batch_update_size: 1
+        enable: true
+        local_update_box:
+        - 12.0
+        - 12.0
+        - 4.0
+        p_free: 0.499
+        p_hit: 0.9
+        p_max: 0.97
+        p_min: 0.12
+        p_miss: 0.45
+        p_occ: 0.85
+        parallel_enable: false
+        ray_range:
+        - 0.1
+        - 8.0
+        unk_thresh: 0.7
+      resolution: 0.1
+      ros_callback:
+        enable: false
+      virtual_ceil_height: 2.5
+      virtual_ground_height: -0.5
+      visualization:
+        enable: true
+        frame_id: world
+        range:
+        - 12.0
+        - 12.0
+        - 4.0
+        rate: 2.0
+    self_filter:
+      box:
+      - -0.33
+      - 0.31
+      - -0.3
+      - 0.3
+      - -0.12
+      - 0.2
+      enabled: true
+    sensor_offset:
+    - -0.32
+    - 0.0
+    - 0.066
+    use_sim_time: true

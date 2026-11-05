@@ -23,6 +23,7 @@
 //
 
 #include "lddc.h"
+#include "comm/timestamp_policy.h"
 #include "comm/comm.h"
 #include "comm/ldq.h"
 
@@ -174,7 +175,7 @@ void Lddc::PublishCustomPointcloud(LidarDataQueue *queue, uint8_t index) {
 
     CustomMsg livox_msg;
     InitCustomMsg(livox_msg, pkg, index);
-    FillPointsToCustomMsg(livox_msg, pkg);
+    if (!FillPointsToCustomMsg(livox_msg, pkg)) continue;
     PublishCustomPointData(livox_msg, index);
   }
 }
@@ -193,11 +194,11 @@ void Lddc::PublishPointcloud2AndCustomMsg(LidarDataQueue *queue,
     PointCloud2 cloud;
     uint64_t timestamp = 0;
     InitPointcloud2Msg(pkg, cloud, timestamp);
-    PublishPointcloud2Data(index, timestamp, cloud);
 
     CustomMsg livox_msg;
     InitCustomMsg(livox_msg, pkg, index);
-    FillPointsToCustomMsg(livox_msg, pkg);
+    if (!FillPointsToCustomMsg(livox_msg, pkg)) continue;
+    PublishPointcloud2Data(index, timestamp, cloud);
     PublishCustomPointData(livox_msg, index);
   }
 }
@@ -340,7 +341,7 @@ void Lddc::InitCustomMsg(CustomMsg &livox_msg, const StoragePacket &pkg,
   }
 }
 
-void Lddc::FillPointsToCustomMsg(CustomMsg &livox_msg,
+bool Lddc::FillPointsToCustomMsg(CustomMsg &livox_msg,
                                  const StoragePacket &pkg) {
   uint32_t points_num = pkg.points_num;
   const std::vector<PointXyzlt> &points = pkg.points;
@@ -352,11 +353,16 @@ void Lddc::FillPointsToCustomMsg(CustomMsg &livox_msg,
     point.reflectivity = points[i].intensity;
     point.tag = points[i].tag;
     point.line = points[i].line;
-    point.offset_time =
-        static_cast<uint32_t>(points[i].offset_time - pkg.base_time);
+    // Storage already validates the frame. Keep this boundary checked as well.
+    if (!relativePointTime(points[i].offset_time, pkg.base_time,
+                           std::numeric_limits<uint32_t>::max(), point.offset_time)) {
+      livox_msg.points.clear(); livox_msg.point_num = 0;
+      return false;
+    }
 
     livox_msg.points.push_back(std::move(point));
   }
+  return true;
 }
 
 void Lddc::PublishCustomPointData(const CustomMsg &livox_msg,

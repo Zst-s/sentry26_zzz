@@ -184,6 +184,7 @@ public:
 	bool update_iterated_dyn_share_modified() {
 		dyn_share_modified<scalar_type> dyn_share;
 		state x_propagated = x_;
+		cov P_propagated = P_;
 		int dof_Measurement;
 		double m_noise;
 		for(int i=0; i<maximum_iter; i++)
@@ -192,6 +193,8 @@ public:
 			h_dyn_share_modified_1(x_, P_.template block<3, 3>(0, 0), P_. template block<3, 3>(3, 3), dyn_share);
 			if(! dyn_share.valid)
 			{
+				x_ = x_propagated;
+				P_ = P_propagated;
 				return false;
 				// continue;
 			}

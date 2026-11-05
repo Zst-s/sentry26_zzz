@@ -1,3 +1,4 @@
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 // #include <so3_math.h>
 #include <malloc.h>
 #include <pcl/filters/voxel_grid.h>
@@ -19,6 +20,12 @@
 
 #include "common_lib.h"
 #include "li_initialization.h"
+#include "point_lio_frames.hpp"
+#include "dense_terrain_registration.hpp"
+#include "point_lio_map_snapshot.hpp"
+#include <std_srvs/srv/trigger.hpp>
+#include <iomanip>
+#include <sstream>
 
 using namespace std;
 
@@ -35,7 +42,7 @@ bool init_map = false, flg_first_scan = true;
 // Time Log Variables
 double match_time = 0, solve_time = 0, propag_time = 0, update_time = 0;
 
-bool flg_reset = false, flg_exit = false;
+bool flg_exit = false;
 
 // surf feature in map
 PointCloudXYZI::Ptr feats_undistort(new PointCloudXYZI());
@@ -45,6 +52,8 @@ std::deque<PointCloudXYZI::Ptr> depth_feats_world;
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
+point_lio_frames::DenseTerrainTrajectory dense_terrain_trajectory;
+
 V3D euler_cur;
 
 nav_msgs::msg::Path path;
@@ -52,6 +61,26 @@ nav_msgs::msg::Odometry odomAftMapped;
 geometry_msgs::msg::PoseStamped msg_body_pose;
 
 auto logger = rclcpp::get_logger("laserMapping");
+
+// Checked at every native prediction call, before the filter is modified.
+template <typename Filter, typename Noise, typename Input>
+void checked_predict(Filter &filter, double dt, Noise &noise, Input &input,
+                     bool state, bool covariance)
+{
+  input_guard.prediction(dt);
+  filter.predict(dt, noise, input, state, covariance);
+}
+
+void require_finite_state()
+{
+  const bool valid = use_imu_as_input
+      ? (kf_input.x_.pos.allFinite() && kf_input.x_.vel.allFinite() &&
+         M3D(kf_input.x_.rot).allFinite() && kf_input.get_P().allFinite())
+      : (kf_output.x_.pos.allFinite() && kf_output.x_.vel.allFinite() &&
+         M3D(kf_output.x_.rot).allFinite() && kf_output.x_.acc.allFinite() &&
+         kf_output.x_.omg.allFinite() && kf_output.get_P().allFinite());
+  if (!valid) throw std::runtime_error("nonfinite Point-LIO state/covariance");
+}
 
 void SigHandle(int sig)
 {
@@ -277,11 +306,62 @@ void set_posestamp(T & out)
   }
 }
 
+// Observe the existing filter state; this branch never predicts or updates it.
+template <typename State>
+void record_dense_terrain_pose(const State &state)
+{
+  if (!dense_terrain_pub_en) return;
+  const M3D rotation = state.rot;
+  const Eigen::Quaterniond q(rotation);
+  tf2::Transform odom_imu(tf2::Quaternion(q.x(), q.y(), q.z(), q.w()),
+                        tf2::Vector3(state.pos.x(), state.pos.y(), state.pos.z()));
+  const M3D extrinsic_rotation = extrinsic_est_en ? M3D(state.offset_R_L_I) : Lidar_R_wrt_IMU;
+  const V3D extrinsic_translation = extrinsic_est_en ? V3D(state.offset_T_L_I) : Lidar_T_wrt_IMU;
+  if (!extrinsic_rotation.allFinite() || !extrinsic_translation.allFinite() ||
+      !rotation.allFinite() || !state.pos.allFinite()) {
+    dense_terrain_trajectory.clear();
+    return;
+  }
+  dense_terrain_trajectory.append(time_current, point_lio_frames::lidarPose(
+      odom_imu, extrinsic_rotation, extrinsic_translation));
+}
+
+void publish_dense_terrain(
+    const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &publisher,
+    const rclcpp::Node::SharedPtr &node)
+{
+  if (!dense_terrain_pub_en || input_guard.failed()) return;
+  PointCloudXYZI cloud;
+  cloud.reserve(feats_undistort->size());
+  for (const auto &point : feats_undistort->points) {
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) continue;
+    tf2::Transform pose;
+    if (!dense_terrain_trajectory.poseAt(
+            Measures.lidar_beg_time + point.curvature / 1000., pose)) continue;
+    const auto world = pose * tf2::Vector3(point.x, point.y, point.z);
+    PointType registered = point;
+    registered.x = world.x(); registered.y = world.y(); registered.z = world.z();
+    cloud.push_back(registered);
+  }
+  if (cloud.empty()) {
+    RCLCPP_WARN_THROTTLE(node->get_logger(), *node->get_clock(), 5000,
+                        "Dense terrain skipped: no point has trajectory coverage");
+    return;
+  }
+  sensor_msgs::msg::PointCloud2 message;
+  pcl::toROSMsg(cloud, message);
+  message.header.frame_id = "odom";
+  message.header.stamp = get_ros_time(lidar_end_time);
+  publisher->publish(message);
+}
+
 void publish_odometry(
   const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped,
+  const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubNavigationOdometry,
   std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br,
   std::unique_ptr<tf2_ros::Buffer> & tf_buffer, rclcpp::Logger logger_)
 {
+  require_finite_state();
   odomAftMapped.header.frame_id = "odom";
   odomAftMapped.child_frame_id = "livox_frame";
   if (publish_odometry_without_downsample) {
@@ -316,19 +396,70 @@ void publish_odometry(
   transform_stamped.header.frame_id = "odom";  // Source frame
   transform_stamped.child_frame_id = "base_link";    // Target frame
 
-  // Calculate the transform from odom to base_link by multiplying the transforms
-  tf2::Transform tf_odom_to_livox_frame;
-  tf2::fromMsg(odomAftMapped.pose.pose, tf_odom_to_livox_frame);
+  // /Odometry and the filter states describe the IMU. Keep that contract for
+  // terrain_node, and compose the actual lidar pose before applying the URDF.
+  tf2::Transform tf_odom_to_imu;
+  tf2::fromMsg(odomAftMapped.pose.pose, tf_odom_to_imu);
+  M3D lidar_to_imu_rotation = Lidar_R_wrt_IMU;
+  V3D lidar_to_imu_translation = Lidar_T_wrt_IMU;
+  if (extrinsic_est_en) {
+    if (use_imu_as_input) {
+      lidar_to_imu_rotation = kf_input.x_.offset_R_L_I;
+      lidar_to_imu_translation = kf_input.x_.offset_T_L_I;
+    } else {
+      lidar_to_imu_rotation = kf_output.x_.offset_R_L_I;
+      lidar_to_imu_translation = kf_output.x_.offset_T_L_I;
+    }
+  }
+  if (!lidar_to_imu_rotation.allFinite() || !lidar_to_imu_translation.allFinite()) {
+    RCLCPP_ERROR(logger_, "Invalid LiDAR-IMU extrinsics; skipping TF publication");
+    return;
+  }
+  const auto tf_odom_to_livox_frame = point_lio_frames::lidarPose(
+      tf_odom_to_imu, lidar_to_imu_rotation, lidar_to_imu_translation);
   tf2::Transform tf_livox_frame_to_base_link;
   tf2::fromMsg(livox_to_base_link_transform.transform, tf_livox_frame_to_base_link);
   tf2::Transform tf_odom_to_base_link =
     tf_odom_to_livox_frame * tf_livox_frame_to_base_link;
 
+  // Independent navigation feedback; preserve the legacy IMU-pose /Odometry
+  // contract used by terrain consumers. Never use an invalid/degraded state.
+  if (input_guard.healthy()) {
+    const V3D velocity_odom = use_imu_as_input ? V3D(kf_input.x_.vel) : V3D(kf_output.x_.vel);
+    const V3D angular_imu = use_imu_as_input ? V3D(input_in.gyro-kf_input.x_.bg) : V3D(kf_output.x_.omg);
+    Eigen::Vector3d linear_base, angular_base;
+    if (point_lio_frames::baseTwist(tf_odom_to_imu,
+          tf_odom_to_imu.inverse()*tf_odom_to_base_link,
+          velocity_odom, angular_imu, linear_base, angular_base)) {
+      nav_msgs::msg::Odometry navigation;
+      navigation.header=odomAftMapped.header;
+      navigation.child_frame_id="base_link";
+      tf2::toMsg(tf_odom_to_base_link, navigation.pose.pose);
+      navigation.twist.twist.linear.x=linear_base.x();
+      navigation.twist.twist.linear.y=linear_base.y();
+      navigation.twist.twist.linear.z=linear_base.z();
+      navigation.twist.twist.angular.x=angular_base.x();
+      navigation.twist.twist.angular.y=angular_base.y();
+      navigation.twist.twist.angular.z=angular_base.z();
+      pubNavigationOdometry->publish(navigation);
+    } else {
+      RCLCPP_ERROR(logger_, "Invalid navigation velocity or frame; skipping navigation odometry");
+    }
+  }
+
   // Convert the resulting transform back to geometry_msgs::TransformStamped
   transform_stamped.transform = tf2::toMsg(tf_odom_to_base_link);
 
-  // Publish the tf
-  tf_br->sendTransform(transform_stamped);
+  auto scan_transform = transform_stamped;
+  scan_transform.child_frame_id = "lidar_scan";
+  scan_transform.transform = tf2::toMsg(point_lio_frames::levelScanPose(
+      tf_odom_to_livox_frame, tf_odom_to_base_link));
+  auto planar_base_transform = transform_stamped;
+  planar_base_transform.child_frame_id = "base_footprint";
+  planar_base_transform.transform = tf2::toMsg(
+      point_lio_frames::planarBasePose(tf_odom_to_base_link));
+  tf_br->sendTransform(std::vector<geometry_msgs::msg::TransformStamped>{
+      transform_stamped, scan_transform, planar_base_transform});
 }
 
 void publish_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
@@ -353,6 +484,15 @@ int main(int argc, char ** argv)
   // rclcpp::AsyncSpinner spinner(0);
   // spinner.start();
   readParameters(nh);
+  input_guard.max_imu_gap = nh->declare_parameter<double>("safety.max_imu_gap", .10);
+  input_guard.max_lidar_gap = nh->declare_parameter<double>("safety.max_lidar_gap", .50);
+  input_guard.max_scan_duration = nh->declare_parameter<double>("safety.max_scan_duration", .25);
+  input_guard.input_timeout = nh->declare_parameter<double>("safety.input_timeout", .30);
+  input_guard.max_clock_jump = nh->declare_parameter<double>("safety.max_clock_jump", .10);
+  input_guard.max_unconstrained_time = nh->declare_parameter<double>("safety.max_unconstrained_time", .30);
+  input_guard.validate();
+  bool simulated_time = false;
+  nh->get_parameter("use_sim_time", simulated_time);
   cout << "lidar_type: " << lidar_type << endl;
   ivox_ = std::make_shared<IVoxType>(ivox_options_);
 
@@ -383,6 +523,7 @@ int main(int argc, char ** argv)
 
   p_imu->lidar_type = p_pre->lidar_type = lidar_type;
   p_imu->imu_en = imu_en;
+  const V3D configured_imu_gravity = p_imu->gravity_;
 
   kf_input.init_dyn_share_modified_2h(get_f_input, df_dx_input, h_model_input);
   kf_output.init_dyn_share_modified_3h(
@@ -404,31 +545,130 @@ int main(int argc, char ** argv)
   /*** ROS subscribe initialization ***/
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc_;
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
+  // Bound transient callback backlog without changing sensor-gap limits.
+  rclcpp::SensorDataQoS lidar_qos;
+  lidar_qos.keep_last(20);
   if (p_pre->lidar_type == AVIA) {
     sub_pcl_livox_ = nh->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-      lid_topic, rclcpp::SensorDataQoS(),
+      lid_topic, lidar_qos,
       [](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { livox_pcl_cbk(msg); });
   } else {
     sub_pcl_pc_ = nh->create_subscription<sensor_msgs::msg::PointCloud2>(
-      lid_topic, rclcpp::SensorDataQoS(),
+      lid_topic, lidar_qos,
       [](const sensor_msgs::msg::PointCloud2::SharedPtr msg) { standard_pcl_cbk(msg); });
   }
 
   auto sub_imu =
-    nh->create_subscription<sensor_msgs::msg::Imu>(imu_topic, rclcpp::SensorDataQoS(), imu_cbk);
+    // Keep IMU samples arriving while the single-threaded executor processes a scan.
+    nh->create_subscription<sensor_msgs::msg::Imu>(
+      imu_topic, rclcpp::SensorDataQoS().keep_last(1000), imu_cbk);
   auto pubLaserCloudFullRes =
     nh->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 1000);
+  auto pubDenseTerrain = nh->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "/cloud_registered_dense_terrain", rclcpp::QoS(2));
   auto pubLaserCloudFullRes_body =
     nh->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 1000);
   auto pubLaserCloudEffect =
     nh->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 1000);
   auto pubLaserCloudMap = nh->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 1000);
   auto pubOdomAftMapped = nh->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 1000);
+  auto pubNavigationOdometry = nh->create_publisher<nav_msgs::msg::Odometry>("/navigation/odometry", 10);
   auto pubPath = nh->create_publisher<nav_msgs::msg::Path>("/path", 1000);
   auto plane_pub = nh->create_publisher<visualization_msgs::msg::Marker>("/planner_normal", 1000);
   auto tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(nh);
   auto tf_buffer = std::make_unique<tf2_ros::Buffer>(nh->get_clock());
   auto transform_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer);
+  // Export parameters are set atomically by export_pointlio_map.py.
+  nh->declare_parameter<std::string>("pcd_save.export_path", "");
+  nh->declare_parameter<int64_t>("pcd_save.map_stamp_sec", 0);
+  nh->declare_parameter<int64_t>("pcd_save.map_stamp_nanosec", 0);
+  auto export_map_service = nh->create_service<std_srvs::srv::Trigger>(
+      "/pointlio/save_map_snapshot",
+      [&](const std_srvs::srv::Trigger::Request::SharedPtr,
+          std_srvs::srv::Trigger::Response::SharedPtr response) {
+        try {
+          if (!input_guard.healthy()) throw std::runtime_error(input_guard.reason());
+          if (!pcd_save_en || pcd_save_interval > 0 || pcl_wait_save->empty()) {
+            throw std::runtime_error("Complete Point-LIO map accumulation unavailable; run mapping with PCD enabled and interval=-1");
+          }
+          const auto seconds = nh->get_parameter("pcd_save.map_stamp_sec").as_int();
+          const auto nanos = nh->get_parameter("pcd_save.map_stamp_nanosec").as_int();
+          if (seconds <= 0 || nanos < 0 || nanos >= 1000000000LL) {
+            throw std::invalid_argument("Invalid saved occupancy-map timestamp");
+          }
+          const rclcpp::Time stamp(seconds, nanos, nh->get_clock()->get_clock_type());
+          const auto transform = tf_buffer->lookupTransform("map", "odom", stamp);
+          const auto path = nh->get_parameter("pcd_save.export_path").as_string();
+          point_lio_frames::saveMapSnapshot(*pcl_wait_save, transform, path);
+          const auto &t = transform.transform.translation;
+          const auto &q = transform.transform.rotation;
+          std::ostringstream metadata;
+          metadata << std::setprecision(17)
+              << "{\"source_frame\":\"odom\",\"frame\":\"map\",\"lio\":\"pointlio\",\"stamp\":["
+              << seconds << ',' << nanos << "],\"points\":" << pcl_wait_save->size()
+              << ",\"last_lidar_stamp\":" << lidar_end_time
+              << ",\"translation\":[" << t.x << ',' << t.y << ',' << t.z
+              << "],\"quaternion\":[" << q.x << ',' << q.y << ',' << q.z << ',' << q.w << "]}";
+          response->message = metadata.str();response->success = true;
+        } catch (const std::exception &error) {
+          response->success = false;response->message = error.what();
+          RCLCPP_ERROR(logger,"Map snapshot failed: %s",error.what());
+        }
+      });
+
+  auto status_pub = nh->create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/pointlio/status", 1);
+  const std::string session_id = std::to_string(getpid()) + "-" +
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  uint64_t status_sequence = 0;
+  auto publish_status = [&]() {
+    diagnostic_msgs::msg::DiagnosticArray message;
+    message.header.stamp = nh->now();
+    diagnostic_msgs::msg::DiagnosticStatus status;
+    status.name = "pointlio/localization"; status.hardware_id = session_id;
+    status.level = input_guard.healthy() ? 0 : input_guard.failed() ? 2 : 1;
+    status.message = input_guard.reason();
+    auto field = [&](const std::string &key, const std::string &value) {
+      diagnostic_msgs::msg::KeyValue item; item.key=key;item.value=value;status.values.push_back(item);
+    };
+    field("state", input_guard.state());
+    field("sequence", std::to_string(++status_sequence));
+    field("generation", std::to_string(input_guard.generation()));
+    auto number_field = [&](const std::string &key, double value) {
+      std::ostringstream text;text<<std::setprecision(17)<<value;field(key,text.str());
+    };
+    number_field("last_valid_stamp", input_guard.last_valid_stamp());
+    const auto &gap = input_guard.timestamp_gap();
+    if (!gap.sensor.empty()) {
+      field("input_gap_sensor", gap.sensor);
+      number_field("input_gap_previous_stamp", gap.previous);
+      number_field("input_gap_current_stamp", gap.current);
+      number_field("input_gap_seconds", gap.current-gap.previous);
+      number_field("input_gap_limit", gap.limit);
+    }
+    message.status.push_back(status);status_pub->publish(message);
+  };
+  auto status_timer = nh->create_wall_timer(std::chrono::milliseconds(50), publish_status);
+  auto restart_startup = [&]() {
+    lidar_buffer.clear();time_buffer.clear();imu_deque.clear();
+    lidar_pushed=false;imu_pushed=false;frame_ct=0;ptr_con->clear();
+    Measures=MeasureGroup();imu_last=sensor_msgs::msg::Imu();imu_next=sensor_msgs::msg::Imu();
+    last_timestamp_lidar=last_timestamp_imu=first_lidar_time=first_imu_time=0.;
+    time_update_last=time_current=time_predict_last_const=t_last=time_con=0.;
+    is_first_frame=true;flg_first_scan=true;init_map=false;
+    dense_terrain_trajectory.clear();init_feats_world->clear();
+    feats_undistort.reset(new PointCloudXYZI());
+    state_input fresh_input;state_output fresh_output;
+    kf_input.change_x(fresh_input);kf_input.change_P(P_init);
+    kf_output.change_x(fresh_output);kf_output.change_P(P_init_output);
+    if (extrinsic_est_en) {
+      kf_input.x_.offset_R_L_I=Lidar_R_wrt_IMU;kf_input.x_.offset_T_L_I=Lidar_T_wrt_IMU;
+      kf_output.x_.offset_R_L_I=Lidar_R_wrt_IMU;kf_output.x_.offset_T_L_I=Lidar_T_wrt_IMU;
+    }
+    p_imu.reset(new ImuProcess());p_imu->lidar_type=lidar_type;p_imu->imu_en=imu_en;
+    p_imu->gravity_=configured_imu_gravity;
+    ivox_.reset(new IVoxType(ivox_options_));
+    RCLCPP_WARN(logger,"Startup input interrupted; rebuilding initialization without ending ROS node");
+  };
   //------------------------------------------------------------------------------------------------------
   signal(SIGINT, SigHandle);
   rclcpp::Rate rate(500);
@@ -436,32 +676,16 @@ int main(int argc, char ** argv)
   executor.add_node(nh);
   while (rclcpp::ok()) {
     if (flg_exit) break;
+    try {
     executor.spin_some();  // 处理当前可用的回调
+    input_guard.poll(input_steady_seconds(), nh->now().seconds(), imu_en, !simulated_time);
+    if (input_guard.take_startup_restart()) restart_startup();
+    if (input_guard.failed()) {
+      lidar_buffer.clear();time_buffer.clear();imu_deque.clear();dense_terrain_trajectory.clear();
+      rate.sleep();continue;
+    }
 
     if (sync_packages(Measures)) {
-      if (flg_reset) {
-        RCLCPP_WARN(logger, "reset when rosbag play back");
-        p_imu->Reset();
-        feats_undistort.reset(new PointCloudXYZI());
-        if (use_imu_as_input) {
-          // state_in = kf_input.get_x();
-          state_in = state_input();
-          kf_input.change_P(P_init);
-        } else {
-          // state_out = kf_output.get_x();
-          state_out = state_output();
-          kf_output.change_P(P_init_output);
-        }
-        flg_first_scan = true;
-        is_first_frame = true;
-        flg_reset = false;
-        init_map = false;
-
-        {
-          ivox_.reset(new IVoxType(ivox_options_));
-        }
-      }
-
       if (flg_first_scan) {
         first_lidar_time = Measures.lidar_beg_time;
         flg_first_scan = false;
@@ -546,6 +770,7 @@ int main(int argc, char ** argv)
           continue;
         }
       }
+      require_finite_state();
       /*** initialize the map ***/
       if (!init_map) {
         feats_down_world->resize(feats_undistort->size());
@@ -577,9 +802,10 @@ int main(int argc, char ** argv)
 
       t2 = omp_get_wtime();
 
+      dense_terrain_trajectory.clear();
       /*** iterated state estimation ***/
-      crossmat_list.reserve(feats_down_size);
-      pbody_list.reserve(feats_down_size);
+      crossmat_list.resize(feats_down_size);
+      pbody_list.resize(feats_down_size);
       // pbody_ext_list.reserve(feats_down_size);
 
       for (size_t i = 0; i < feats_down_body->size(); i++) {
@@ -607,6 +833,7 @@ int main(int argc, char ** argv)
           crossmat_list[i] = point_crossmat;
         }
       }
+      size_t frame_valid_updates = 0;
       if (!use_imu_as_input) {
         bool imu_upda_cov = false;
         effct_feat_num = 0;
@@ -663,7 +890,7 @@ int main(int argc, char ** argv)
 
                 /*** covariance update ***/
                 double dt = get_time_sec(imu_next.header.stamp) - time_predict_last_const;
-                kf_output.predict(dt, Q_output, input_in, true, false);
+                checked_predict(kf_output, dt, Q_output, input_in, true, false);
                 time_predict_last_const = get_time_sec(imu_next.header.stamp);  // big problem
 
                 {
@@ -673,7 +900,7 @@ int main(int argc, char ** argv)
                     time_update_last = get_time_sec(imu_next.header.stamp);
                     double propag_imu_start = omp_get_wtime();
 
-                    kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                    checked_predict(kf_output, dt_cov, Q_output, input_in, false, true);
 
                     propag_time += omp_get_wtime() - propag_imu_start;
                     double solve_imu_start = omp_get_wtime();
@@ -688,20 +915,17 @@ int main(int argc, char ** argv)
                 imu_comes = time_current > get_time_sec(imu_next.header.stamp);
               }
             }
-            if (flg_reset) {
-              break;
-            }
 
             double dt = time_current - time_predict_last_const;
             double propag_state_start = omp_get_wtime();
             if (!prop_at_freq_of_imu) {
               double dt_cov = time_current - time_update_last;
               if (dt_cov > 0.0) {
-                kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                checked_predict(kf_output, dt_cov, Q_output, input_in, false, true);
                 time_update_last = time_current;
               }
             }
-            kf_output.predict(dt, Q_output, input_in, true, false);
+            checked_predict(kf_output, dt, Q_output, input_in, true, false);
             propag_time += omp_get_wtime() - propag_state_start;
             time_predict_last_const = time_current;
             double t_update_start = omp_get_wtime();
@@ -711,7 +935,10 @@ int main(int argc, char ** argv)
               idx += time_seq[k];
               continue;
             }
-            if (!kf_output.update_iterated_dyn_share_modified()) {
+            const bool lidar_update_ok = kf_output.update_iterated_dyn_share_modified();
+            if (lidar_update_ok) ++frame_valid_updates;
+            record_dense_terrain_pose(kf_output.x_);
+            if (!lidar_update_ok) {
               idx = idx + time_seq[k];
               continue;
             }
@@ -720,7 +947,7 @@ int main(int argc, char ** argv)
             if (publish_odometry_without_downsample) {
               /******* Publish odometry *******/
 
-              publish_odometry(pubOdomAftMapped, tf_broadcaster, tf_buffer, nh->get_logger());
+              publish_odometry(pubOdomAftMapped, pubNavigationOdometry, tf_broadcaster, tf_buffer, nh->get_logger());
               if (runtime_pos_log) {
                 euler_cur = SO3ToEuler(kf_output.x_.rot);
                 fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " "
@@ -787,10 +1014,10 @@ int main(int argc, char ** argv)
                 {
                   double dt_cov = time_current - time_update_last;
                   if (dt_cov > 0.0) {
-                    kf_output.predict(dt_cov, Q_output, input_in, false, true);
+                    checked_predict(kf_output, dt_cov, Q_output, input_in, false, true);
                     time_update_last = time_current;
                   }
-                  kf_output.predict(dt, Q_output, input_in, true, false);
+                  checked_predict(kf_output, dt, Q_output, input_in, true, false);
                 }
 
                 time_predict_last_const = time_current;
@@ -858,10 +1085,10 @@ int main(int argc, char ** argv)
 
               double dt_cov = get_time_sec(imu_last.header.stamp) - time_update_last;
               if (dt_cov > 0.0) {
-                kf_input.predict(dt_cov, Q_input, input_in, false, true);
+                checked_predict(kf_input, dt_cov, Q_input, input_in, false, true);
                 time_update_last = get_time_sec(imu_last.header.stamp);  // time_current;
               }
-              kf_input.predict(dt, Q_input, input_in, true, false);
+              checked_predict(kf_input, dt, Q_input, input_in, true, false);
               t_last = get_time_sec(imu_last.header.stamp);
               imu_prop_cov = true;
 
@@ -870,9 +1097,6 @@ int main(int argc, char ** argv)
               imu_next = *(imu_deque.front());
               // imu_upda_cov = true;
             }
-            if (flg_reset) {
-              break;
-            }
             double dt = time_current - t_last;
             t_last = time_current;
             double propag_start = omp_get_wtime();
@@ -880,11 +1104,11 @@ int main(int argc, char ** argv)
             if (!prop_at_freq_of_imu) {
               double dt_cov = time_current - time_update_last;
               if (dt_cov > 0.0) {
-                kf_input.predict(dt_cov, Q_input, input_in, false, true);
+                checked_predict(kf_input, dt_cov, Q_input, input_in, false, true);
                 time_update_last = time_current;
               }
             }
-            kf_input.predict(dt, Q_input, input_in, true, false);
+            checked_predict(kf_input, dt, Q_input, input_in, true, false);
 
             propag_time += omp_get_wtime() - propag_start;
 
@@ -896,7 +1120,10 @@ int main(int argc, char ** argv)
               idx += time_seq[k];
               continue;
             }
-            if (!kf_input.update_iterated_dyn_share_modified()) {
+            const bool lidar_update_ok = kf_input.update_iterated_dyn_share_modified();
+            if (lidar_update_ok) ++frame_valid_updates;
+            record_dense_terrain_pose(kf_input.x_);
+            if (!lidar_update_ok) {
               idx = idx + time_seq[k];
               continue;
             }
@@ -906,7 +1133,7 @@ int main(int argc, char ** argv)
             if (publish_odometry_without_downsample) {
               /******* Publish odometry *******/
 
-              publish_odometry(pubOdomAftMapped, tf_broadcaster, tf_buffer, nh->get_logger());
+              publish_odometry(pubOdomAftMapped, pubNavigationOdometry, tf_broadcaster, tf_buffer, nh->get_logger());
               if (runtime_pos_log) {
                 euler_cur = SO3ToEuler(kf_input.x_.rot);
                 fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " "
@@ -967,10 +1194,10 @@ int main(int argc, char ** argv)
 
                 double dt_cov = time_current - time_update_last;
                 if (dt_cov > 0.0) {
-                  // kf_input.predict(dt_cov, Q_input, input_in, false, true);
+                  // checked_predict(kf_input, dt_cov, Q_input, input_in, false, true);
                   time_update_last = get_time_sec(imu_next.header.stamp);  // time_current;
                 }
-                // kf_input.predict(dt, Q_input, input_in, true, false);
+                // checked_predict(kf_input, dt, Q_input, input_in, true, false);
 
                 t_last = get_time_sec(imu_next.header.stamp);
 
@@ -993,6 +1220,11 @@ int main(int argc, char ** argv)
           }
         }
       }
+      require_finite_state();
+      if (!input_guard.frame(frame_valid_updates>0, lidar_end_time, input_steady_seconds())) {
+        dense_terrain_trajectory.clear();publish_status();rate.sleep();continue;
+      }
+      publish_status();
       // M3D rot_cur_lidar;
       // {
       //     rot_cur_lidar = state.rot_end;
@@ -1002,7 +1234,7 @@ int main(int argc, char ** argv)
       //                     (euler_cur(0), euler_cur(1), euler_cur(2));
       /******* Publish odometry downsample *******/
       if (!publish_odometry_without_downsample) {
-        publish_odometry(pubOdomAftMapped, tf_broadcaster, tf_buffer, nh->get_logger());
+        publish_odometry(pubOdomAftMapped, pubNavigationOdometry, tf_broadcaster, tf_buffer, nh->get_logger());
       }
 
       /*** add the feature points to map ***/
@@ -1014,6 +1246,7 @@ int main(int argc, char ** argv)
 
       t5 = omp_get_wtime();
       /******* Publish points *******/
+      publish_dense_terrain(pubDenseTerrain, nh);
       if (path_en) publish_path(pubPath);
       if (scan_pub_en || pcd_save_en) publish_frame_world(pubLaserCloudFullRes);
       if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFullRes_body);
@@ -1058,8 +1291,14 @@ int main(int argc, char ** argv)
         dump_lio_state_to_log(fp);
       }
     }
+    } catch (const std::exception &error) {
+      input_guard.fail(error.what());
+      publish_status();
+    }
     rate.sleep();
   }
+  // A retained fault session must never export a stale/mixed map at shutdown.
+  if (!input_guard.healthy()) return 0;
   //--------------------------save map-----------------------------------
   /* 1. make sure you have enough memories
      2. noted that pcd save will influence the real-time performences **/

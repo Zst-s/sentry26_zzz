@@ -112,6 +112,11 @@ namespace rog_map {
         double cellLastHitTime(const Vec3i &id_g) const;
         double cellLastUpdateTime(const Vec3i &id_g) const;
 
+        // 仅供只读净空诊断：默认不分配。记录直接射线观测，不把衰减当作新证据。
+        void enableObservationTracking();
+        double cellDirectObservationTime(const Vec3i &id_g) const;
+        GridType rawObservedType(const Vec3i &id_g) const;
+
         bool applyDecay(double now);
 
         RuntimeStats runtimeStats() const { return runtime_stats_; }
@@ -125,6 +130,7 @@ namespace rog_map {
         std::vector<float> occupancy_buffer_;
         std::vector<double> last_hit_time_;
         std::vector<double> last_update_time_;
+        std::vector<double> direct_observation_time_;
         std::vector<int> active_ids_;
         std::vector<uint8_t> active_flags_;
         std::vector<int> dirty_column_ids_;

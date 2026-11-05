@@ -669,8 +669,22 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
   transform_stamped.child_frame_id = "base_link";    // Target frame
 
   // Calculate the transform from odom to base_link by multiplying the transforms
-  tf2::Transform tf_odom_to_livox_frame;
-  tf2::fromMsg(odomAftMapped.pose.pose, tf_odom_to_livox_frame);
+  // The filter pose (and the legacy /Odometry payload) is the IMU pose,
+  // not the lidar pose. Registered body points are also in IMU coordinates.
+  // Convert with the SAME estimated lidar-to-IMU extrinsics used by
+  // RGBpointBodyToWorld before composing the URDF lidar-to-base transform.
+  // Keep /Odometry's payload unchanged: terrain_node consumes its IMU pose.
+  tf2::Transform tf_odom_to_imu;
+  tf2::fromMsg(odomAftMapped.pose.pose, tf_odom_to_imu);
+  const Eigen::Matrix3d lidar_to_imu_rotation = state_point.offset_R_L_I.matrix();
+  tf2::Transform tf_imu_to_livox_frame;
+  tf_imu_to_livox_frame.setBasis(tf2::Matrix3x3(
+    lidar_to_imu_rotation(0, 0), lidar_to_imu_rotation(0, 1), lidar_to_imu_rotation(0, 2),
+    lidar_to_imu_rotation(1, 0), lidar_to_imu_rotation(1, 1), lidar_to_imu_rotation(1, 2),
+    lidar_to_imu_rotation(2, 0), lidar_to_imu_rotation(2, 1), lidar_to_imu_rotation(2, 2)));
+  tf_imu_to_livox_frame.setOrigin(tf2::Vector3(
+    state_point.offset_T_L_I(0), state_point.offset_T_L_I(1), state_point.offset_T_L_I(2)));
+  const tf2::Transform tf_odom_to_livox_frame = tf_odom_to_imu * tf_imu_to_livox_frame;
   tf2::Transform tf_livox_frame_to_base_link;
   tf2::fromMsg(livox_to_base_link_transform.transform, tf_livox_frame_to_base_link);
   tf2::Transform tf_odom_to_base_link =

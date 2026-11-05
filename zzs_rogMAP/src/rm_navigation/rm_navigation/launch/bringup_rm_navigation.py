@@ -129,6 +129,7 @@ def generate_launch_description():
                               'params_file': params_file,
                               'use_composition': use_composition,
                               'use_respawn': use_respawn,
+                              'cmd_vel_output': LaunchConfiguration('cmd_vel_output'),
                               'container_name': 'nav2_container'}.items()),
 
         IncludeLaunchDescription(
@@ -157,6 +158,7 @@ def generate_launch_description():
     ld.add_action(declare_log_level_cmd)
     ld.add_action(declare_nav_rviz_cmd)
     ld.add_action(declare_rviz_config_cmd)
+    ld.add_action(DeclareLaunchArgument('cmd_vel_output', default_value='cmd_vel'))
 
     # Add the actions to launch all of the navigation nodes
     ld.add_action(bringup_cmd_group)

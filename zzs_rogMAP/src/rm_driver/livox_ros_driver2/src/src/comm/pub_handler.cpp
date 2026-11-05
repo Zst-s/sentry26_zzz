@@ -23,6 +23,7 @@
 //
 
 #include "pub_handler.h"
+#include "timestamp_policy.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -222,12 +223,11 @@ void PubHandler::CheckTimer(uint32_t id) {
       frame_.lidar_num = 0;
     }
   } else { // Disable time synchronization
-    auto now_time = std::chrono::high_resolution_clock::now();
+    auto now_time = std::chrono::steady_clock::now();
     // First Set
-    static bool first = true;
-    if (first) {
+    if (!timer_started_) {
       last_pub_time_ = now_time;
-      first = false;
+      timer_started_ = true;
       return;
     }
     if (now_time - last_pub_time_ <
@@ -235,6 +235,10 @@ void PubHandler::CheckTimer(uint32_t id) {
       return;
     }
     last_pub_time_ += std::chrono::nanoseconds(publish_interval_);
+    // Preserve normal cadence, but do not emit catch-up bursts after an outage.
+    if (now_time - last_pub_time_ >= std::chrono::nanoseconds(publish_interval_)) {
+      last_pub_time_ = now_time;
+    }
     for (auto &process_handler : lidar_process_handlers_) {
       frame_.base_time[frame_.lidar_num] =
           process_handler.second->GetLidarBaseTime();
@@ -307,7 +311,8 @@ uint64_t PubHandler::GetEthPacketTimestamp(uint8_t timestamp_type,
     return time.stamp;
   }
 
-  return std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  static const MonotonicEpoch clock;
+  return clock.now();
 }
 
 /*******************************/

@@ -72,6 +72,9 @@
 
 // messages
 #include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <chrono>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <teb_msgs/msg/trajectory_msg.hpp>
 #include <teb_msgs/msg/trajectory_point_msg.hpp>
@@ -645,6 +648,8 @@ protected:
    * @see optimizeGraph
    */
   void AddEdgesViaPoints();
+  void AddEdgesGlobalPlanOrientation();
+  double globalPlanOrientationAt(const PoseSE2& pose) const;
   
   /**
    * @brief Add all edges (local cost functions) related to keeping a distance from dynamic (moving) obstacles.
@@ -698,6 +703,21 @@ protected:
    * @return shared pointer to the g2o::SparseOptimizer instance
    */
   std::shared_ptr<g2o::SparseOptimizer> initOptimizer();
+
+  // 只读诊断：默认关闭，每次采样保留各外循环的优化前后状态。
+  void publishOptimizationDiagnostics(const std::string& stage, int iteration);
+  rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr diagnostic_markers_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::String>::SharedPtr diagnostic_details_;
+  std::chrono::steady_clock::time_point diagnostic_last_{};
+  bool diagnostic_cycle_{false};
+  unsigned long diagnostic_sequence_{0};
+  std::string diagnostic_initialization_{"unknown"};
+  bool previous_translation_only_{false};
+  std::string diagnostic_obstacle_decisions_; //!< 建图时的真实筛选结果，after 阶段不重新推算
+  std::vector<geometry_msgs::msg::PoseStamped> diagnostic_reference_plan_;
+  std::vector<geometry_msgs::msg::PoseStamped> orientation_reference_plan_;
+  bool previous_follow_global_plan_orientation_{false};
+  bool previous_shortest_rotation_initialization_{false};
     
 
   // external objects (store weak pointers)

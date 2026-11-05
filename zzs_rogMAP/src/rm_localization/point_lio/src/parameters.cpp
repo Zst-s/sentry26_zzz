@@ -9,8 +9,6 @@ int ivox_nearby_type = 6;
 
 std::vector<double> extrinT(3, 0.0);
 std::vector<double> extrinR(9, 0.0);
-state_input state_in;
-state_output state_out;
 std::string lid_topic, imu_topic;
 bool prop_at_freq_of_imu = true, check_satu = true, con_frame = false, cut_frame = false;
 bool use_imu_as_input = false, space_down_sample = true, publish_odometry_without_downsample = false;
@@ -30,6 +28,7 @@ int    lidar_type, pcd_save_interval;
 std::vector<double> gravity_init, gravity;
 bool   runtime_pos_log, pcd_save_en, path_en, extrinsic_est_en = true;
 bool   scan_pub_en, scan_body_pub_en;
+bool dense_terrain_pub_en = false;
 shared_ptr<Preprocess> p_pre;
 shared_ptr<ImuProcess> p_imu;
 double time_update_last = 0.0, time_current = 0.0, time_predict_last_const = 0.0, t_last = 0.0;
@@ -97,6 +96,7 @@ void readParameters(shared_ptr<rclcpp::Node> &nh)
   nh->declare_parameter<bool>("odometry.publish_odometry_without_downsample", false);
   nh->declare_parameter<bool>("publish.path_en", true);
   nh->declare_parameter<bool>("publish.scan_publish_en", true);
+  nh->declare_parameter<bool>("publish.dense_terrain_en", false);
   nh->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
   nh->declare_parameter<bool>("runtime_pos_log_enable", false);
   nh->declare_parameter<bool>("pcd_save.pcd_save_en", false);
@@ -152,6 +152,7 @@ void readParameters(shared_ptr<rclcpp::Node> &nh)
   nh->get_parameter("odometry.publish_odometry_without_downsample", publish_odometry_without_downsample);
   nh->get_parameter("publish.path_en", path_en);
   nh->get_parameter("publish.scan_publish_en", scan_pub_en);
+  nh->get_parameter("publish.dense_terrain_en", dense_terrain_pub_en);
   nh->get_parameter("publish.scan_bodyframe_pub_en", scan_body_pub_en);
   nh->get_parameter("runtime_pos_log_enable", runtime_pos_log);
   nh->get_parameter("pcd_save.pcd_save_en", pcd_save_en);

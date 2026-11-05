@@ -138,6 +138,8 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, Point
 template <int dim, IVoxNodeType node_type, typename PointType>
 bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, PointVector& closest_pt, int max_num,
                                                       double max_range) {
+    // A failed query must not leave neighbours from another point/frame.
+    closest_pt.clear();
     std::vector<DistPoint> candidates;
     candidates.reserve(max_num * nearby_grids_.size());
 
@@ -202,7 +204,6 @@ bool IVox<dim, node_type, PointType>::GetClosestPoint(const PointType& pt, Point
     }
 #endif
 
-    closest_pt.clear();
     for (auto& it : candidates) {
         closest_pt.emplace_back(it.Get());
     }

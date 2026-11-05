@@ -1,3 +1,5 @@
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <map>
 #include "rclcpp/rclcpp.hpp"
 #include "serial/serial.h"
 #include "std_msgs/msg/string.hpp"
@@ -25,6 +27,7 @@
 #include <mutex>
 #include <atomic>
 #include <vector>
+#include <cmath>
 // #include "rcl_interfaces/msg/log.hpp"
 
 using namespace std;
@@ -72,9 +75,98 @@ class SerialChassis : public rclcpp::Node
 public:
     SerialChassis() : Node("serial_chassis_node")
     {
+        try {
+            tx_status_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+                "/passage/serial_tx_status", rclcpp::SensorDataQoS().keep_last(5));
+        } catch (const std::exception &error) {
+            RCLCPP_WARN(get_logger(), "Serial observation unavailable: %s", error.what());
+        }
+        serial_port_ = declare_parameter<std::string>("serial_port", "/dev/ttyUSB0");
+        command_timeout_ = declare_parameter<double>("command_timeout", 0.25);
+        if (!std::isfinite(command_timeout_) || command_timeout_ <= 0 || command_timeout_ > 1.0)
+            throw std::invalid_argument("command_timeout must be in (0, 1] seconds");
+        require_localization_health_ = declare_parameter<bool>("require_localization_health", false);
+        if (require_localization_health_) {
+            health_sub_ = create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+                "/pointlio/status", 1, [this](diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr msg) {
+                    try {
+                        if (msg->status.size()!=1) throw std::invalid_argument("status count");
+                        const auto &st=msg->status.front();
+                        std::map<std::string,std::string> values;
+                        for (const auto &kv:st.values)
+                            if (!values.emplace(kv.key,kv.value).second) throw std::invalid_argument("duplicate field");
+                        if (st.name!="pointlio/localization" || st.hardware_id.empty())
+                            throw std::invalid_argument("status identity");
+                        size_t used=0;
+                        const auto generation=std::stoull(values.at("generation"),&used);
+                        if (used!=values.at("generation").size() || generation<health_generation_)
+                            throw std::invalid_argument("generation");
+                        const auto seq=std::stoull(values.at("sequence"),&used);
+                        if (used!=values.at("sequence").size() || seq==0) throw std::invalid_argument("sequence");
+                        const double stamp=std::stod(values.at("last_valid_stamp"),&used);
+                        if (used!=values.at("last_valid_stamp").size() || !std::isfinite(stamp) || stamp<0)
+                            throw std::invalid_argument("stamp");
+                        if (health_session_.empty()) health_session_=st.hardware_id;
+                        health_session_changed_ = health_session_changed_ || st.hardware_id!=health_session_;
+                        if (health_session_changed_) {health_tracking_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();return;}
+                        if (seq<=health_sequence_) return;
+                        if (generation!=health_generation_) {motion_ready_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();}
+                        health_generation_=generation;
+                        health_sequence_=seq;health_at_=std::chrono::steady_clock::now();
+                        const double published=msg->header.stamp.sec+msg->header.stamp.nanosec*1e-9;
+                        health_tracking_=st.level==0 && values.at("state")=="TRACKING" && stamp>0 &&
+                            published-stamp>=-.1 && published-stamp<=odometry_timeout_;
+                        if (!health_tracking_) {cmd_vel_buffer=geometry_msgs::msg::Twist();motion_ready_=false;}
+                    } catch (const std::exception &) {health_tracking_=false;motion_ready_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();}
+                });
+            motion_ready_sub_ = create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+                "/passage/localization_motion_ready", 1,
+                [this](diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr msg) {
+                    try {
+                        if (msg->status.size()!=1) throw std::invalid_argument("navigation status count");
+                        const auto &st=msg->status.front();std::map<std::string,std::string> values;
+                        for (const auto &kv:st.values)
+                            if (!values.emplace(kv.key,kv.value).second) throw std::invalid_argument("duplicate field");
+                        size_t used=0;const auto generation=std::stoull(values.at("generation"),&used);
+                        if (used!=values.at("generation").size()) throw std::invalid_argument("generation");
+                        const auto seq=std::stoull(values.at("sequence"),&used);
+                        if (used!=values.at("sequence").size() || !seq) throw std::invalid_argument("sequence");
+                        if (st.name!="pointlio/navigation" || st.hardware_id!=health_session_ ||
+                            generation!=health_generation_) {motion_ready_=false;return;}
+                        if (seq<=motion_sequence_) return;
+                        motion_sequence_=seq;
+                        motion_ready_=st.level==0 && values.at("state")=="READY";
+                        motion_ready_at_=std::chrono::steady_clock::now();
+                        if (!motion_ready_ || !previous_motion_ready_) cmd_vel_buffer=geometry_msgs::msg::Twist();
+                        previous_motion_ready_=motion_ready_;
+                    } catch (const std::exception &) {motion_ready_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();}
+                });
+        }
+        require_odometry_ = declare_parameter<bool>("require_odometry", false);
+        odometry_timeout_ = declare_parameter<double>("odometry_timeout", .25);
+        if (!std::isfinite(odometry_timeout_) || odometry_timeout_ <= 0. || odometry_timeout_ > 1.)
+            throw std::invalid_argument("odometry_timeout must be in (0, 1] seconds");
+        if (require_odometry_) {
+            odometry_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+                "/Odometry", rclcpp::SensorDataQoS().keep_last(1),
+                [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+                    const auto &p = msg->pose.pose.position;
+                    const auto &q = msg->pose.pose.orientation;
+                    if (msg->header.stamp.sec < 0 || msg->header.stamp.nanosec >= 1000000000U) return;
+                    const int64_t stamp = int64_t(msg->header.stamp.sec)*1000000000LL + msg->header.stamp.nanosec;
+                    if (msg->header.frame_id != "odom" || !std::isfinite(p.x) ||
+                        !std::isfinite(p.y) || !std::isfinite(p.z) ||
+                        !std::isfinite(q.x) || !std::isfinite(q.y) ||
+                        !std::isfinite(q.z) || !std::isfinite(q.w) ||
+                        q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w < 1e-6 ||
+                        stamp <= last_odometry_stamp_) return;
+                    last_odometry_stamp_ = stamp;
+                    last_odometry_ = std::chrono::steady_clock::now();
+                });
+        }
         target_stance_sub = this->create_subscription<std_msgs::msg::UInt8>("/target_stance", 10, std::bind(&SerialChassis::target_stance_callback, this, _1));
         super_ele_sub = this->create_subscription<std_msgs::msg::UInt8>("/super_ele", 10, std::bind(&SerialChassis::super_ele_callback, this, _1));
-        cmd_vel_sub = this->create_subscription<geometry_msgs::msg::Twist>("/cmd_vel", 10, std::bind(&SerialChassis::cmd_vel_callback, this, _1));
+        cmd_vel_sub = this->create_subscription<geometry_msgs::msg::Twist>("/cmd_vel", 1, std::bind(&SerialChassis::cmd_vel_callback, this, _1));
         if_qifu_sub = this->create_subscription<std_msgs::msg::UInt8>("/if_qifu", 10, std::bind(&SerialChassis::if_qifu_callback, this, _1));
         intensify_sub = this->create_subscription<std_msgs::msg::UInt8>("/intensify", 10, std::bind(&SerialChassis::intensify_callback, this, _1));
 
@@ -99,13 +191,13 @@ public:
         // 保护代码
         try
         {
-            ser.setPort("/dev/ttyUSB0"); // 设置要打开的串口名称
+            ser.setPort(serial_port_);
             ser.setBaudrate(115200);     // 设置串口通信的波特率
-            serial::Timeout to = serial::Timeout::simpleTimeout(1000);
+            serial::Timeout to = serial::Timeout::simpleTimeout(10);
             ser.setTimeout(to);
             ser.open(); // 打开串口
         }
-        catch (serial::IOException &e)
+        catch (const std::exception &e)
         {
             RCLCPP_ERROR(this->get_logger(), "无法打开端口！！！ 将在运行时重试打开串口");
             // Do not shutdown here; allow main loop to attempt reconnects
@@ -133,6 +225,8 @@ public:
         if (read_thread_.joinable()) {
             read_thread_.join();
         }
+        // Best effort only: MCU must independently stop when this process dies.
+        data_pack(geometry_msgs::msg::Twist());
         try {
             std::lock_guard<std::mutex> lk(ser_mutex);
             if (ser.isOpen()) ser.close();
@@ -145,12 +239,15 @@ public:
         using namespace std::chrono_literals;
         while (rclcpp::ok() && running_.load()) {
             // ensure serial is open
-            if (!ser.isOpen()) {
+            bool connected;
+            { std::lock_guard<std::mutex> lk(ser_mutex); connected = ser.isOpen(); }
+            if (!connected) {
+                discard_command_.store(true);
                 try {
                     std::lock_guard<std::mutex> lk(ser_mutex);
-                    ser.setPort("/dev/ttyUSB0");
+                    ser.setPort(serial_port_);
                     ser.setBaudrate(115200);
-                    serial::Timeout to = serial::Timeout::simpleTimeout(500);
+                    serial::Timeout to = serial::Timeout::simpleTimeout(10);
                     ser.setTimeout(to);
                     ser.open();
                     if (ser.isOpen()) {
@@ -163,16 +260,15 @@ public:
                 }
             }
 
-            // read available bytes (try to read at least 1 byte so we don't rely on available())
+            // Never hold the serial mutex waiting for a byte: that blocks stop commands.
             try {
-                size_t avail = 0;
-                try { avail = ser.available(); } catch (...) { avail = 0; }
-                size_t to_read = avail ? std::min(avail, (size_t)256) : 1; // at least read 1
-                std::vector<unsigned char> temp(to_read);
+                std::vector<unsigned char> temp(256);
                 size_t nread = 0;
                 {
                     std::lock_guard<std::mutex> lk(ser_mutex);
-                    nread = ser.read(temp.data(), to_read);
+                    const auto available = ser.available();
+                    if (available > 0)
+                        nread = ser.read(temp.data(), std::min(available, size_t(256)));
                 }
                 if (nread > 0) {
                     std::lock_guard<std::mutex> lk(recv_mutex_);
@@ -298,7 +394,41 @@ public:
     }
 
 
-    void data_pack(const geometry_msgs::msg::Twist &cmd_vel)
+    void publish_tx_observation(const geometry_msgs::msg::Twist &command,
+        int64_t written, const std::string &result, const std::string &blocking_reason) noexcept
+    {
+        if (!tx_status_pub_ || !rclcpp::ok()) return;
+        try {
+            diagnostic_msgs::msg::DiagnosticArray message;
+            message.header.stamp = now();
+            message.header.frame_id = "base_link";
+            diagnostic_msgs::msg::DiagnosticStatus status;
+            status.name = "decision/serial_tx";
+            status.hardware_id = serial_port_;
+            status.level = result == "write_complete" ? 0 : 2;
+            status.message = result;
+            const auto field = [&](const std::string &key, const std::string &value) {
+                diagnostic_msgs::msg::KeyValue entry;
+                entry.key = key; entry.value = value; status.values.push_back(entry);
+            };
+            field("sequence", std::to_string(++tx_observation_sequence_));
+            field("requested_bytes", std::to_string(sBUFFERSIZE));
+            field("written_bytes", std::to_string(written)); // -1: exception, byte count unknown.
+            field("blocking_reason", blocking_reason);
+            field("frame_vx", std::to_string(static_cast<float>(command.linear.x)));
+            field("frame_vy", std::to_string(static_cast<float>(command.linear.y)));
+            field("frame_wz", std::to_string(static_cast<float>(command.angular.z)));
+            field("target_stance", std::to_string(target_stance));
+            field("nav_ready", std::to_string(nav_ready));
+            message.status.push_back(status);
+            tx_status_pub_->publish(message);
+        } catch (...) {
+            // Observation must never change the existing serial/control path.
+        }
+    }
+
+    void data_pack(const geometry_msgs::msg::Twist &cmd_vel,
+                   const std::string &blocking_reason = "none")
     {
         // 定义X Y Z（Ang_V）角速度
         float_union Vx, Vy, Vz;
@@ -339,20 +469,29 @@ public:
         s_buffer[17] = if_qifu;    // 起伏路段标志
         s_buffer[18] = intensify;  // 是否强化模式
 
-        // 将打包好的数据发送（带锁和异常保护）
-        std::lock_guard<std::mutex> lk(ser_mutex);
-        if (!ser.isOpen()) {
-            RCLCPP_WARN(this->get_logger(), "串口未打开，跳过发送");
-            return;
+        int64_t written = 0;
+        std::string result = "port_closed";
+        {
+            // Release the serial mutex before publishing observation data.
+            std::lock_guard<std::mutex> lk(ser_mutex);
+            if (!ser.isOpen()) {
+                discard_command_.store(true);
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *get_clock(), 2000, "串口未打开，跳过发送");
+            } else {
+                try {
+                    written = static_cast<int64_t>(ser.write(s_buffer, sBUFFERSIZE));
+                    result = written == sBUFFERSIZE ? "write_complete" : "write_incomplete";
+                    RCLCPP_DEBUG(this->get_logger(), "发送成功");
+                } catch (const std::exception &e) {
+                    written = -1;
+                    result = "write_error";
+                    discard_command_.store(true);
+                    RCLCPP_ERROR(this->get_logger(), "串口写入异常: %s", e.what());
+                    try { ser.close(); } catch (...) {}
+                }
+            }
         }
-        try {
-            ser.write(s_buffer, sBUFFERSIZE);
-            RCLCPP_DEBUG(this->get_logger(), "发送成功");
-        } catch (const std::exception &e) {
-            RCLCPP_ERROR(this->get_logger(), "串口写入异常: %s", e.what());
-            // 尝试关闭串口以触发上层重连逻辑
-            try { ser.close(); } catch (...) {}
-        }
+        publish_tx_observation(cmd_vel, written, result, blocking_reason);
     }
 
 
@@ -392,23 +531,44 @@ public:
     // 订阅cmd_vel话题的回调函数,用于显示速度以及角速度
     void cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr cmd_vel)
     {
-        // 存储最新的速度指令，并标记新指令已经接收
-        cmd_vel_buffer = *cmd_vel;
+        const auto &v = *cmd_vel;
+        const bool valid = std::isfinite(v.linear.x) && std::isfinite(v.linear.y) &&
+            std::isfinite(v.angular.z) && v.linear.z == 0 && v.angular.x == 0 && v.angular.y == 0;
+        last_command_valid_ = valid;
+        cmd_vel_buffer = valid && localization_ready() ? v : geometry_msgs::msg::Twist();
+        last_command_ = std::chrono::steady_clock::now();
         new_cmd_vel_received = true;
+    }
+
+    bool localization_ready() const {
+        if (!require_localization_health_) return true;
+        const auto now=std::chrono::steady_clock::now();
+        return health_tracking_ && !health_session_changed_ && motion_ready_ &&
+            std::chrono::duration<double>(now-health_at_).count()<=odometry_timeout_ &&
+            std::chrono::duration<double>(now-motion_ready_at_).count()<=odometry_timeout_;
     }
 
     // 定时器回调函数
     void timer_callback()
     {
-        // 如果有新的速度指令到来，就发送该速度指令
-        if (new_cmd_vel_received || new_target_stance_received || nav_ready_received)
-        {
-            data_pack(cmd_vel_buffer);
-            new_cmd_vel_received = false;
-            new_target_stance_received = false;
-            nav_ready_received = true;
-            // rosout_received = false;
-        }
+        const double age = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - last_command_).count();
+        const bool odometry_missing = require_odometry_ && std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - last_odometry_).count() > odometry_timeout_;
+        std::string blocking_reason = "none";
+        if (discard_command_.exchange(false)) blocking_reason = "serial_discard";
+        else if (age > command_timeout_) blocking_reason = "command_timeout";
+        else if (nav_ready == 0) blocking_reason = "nav_ready_zero";
+        else if (odometry_missing) blocking_reason = "odometry_timeout";
+        else if (!localization_ready()) blocking_reason = "localization_not_ready";
+        if (blocking_reason != "none")
+            cmd_vel_buffer = geometry_msgs::msg::Twist();
+        else if (!last_command_valid_)
+            blocking_reason = "invalid_command"; // The input callback already zeroed the buffer.
+        data_pack(cmd_vel_buffer, blocking_reason);
+        new_cmd_vel_received = false;
+        new_target_stance_received = false;
+        nav_ready_received = false;
     }
 
     rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr target_stance_sub;
@@ -429,8 +589,27 @@ public:
     rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr mid_if_pub;           //RMUL
     rclcpp::Publisher<rm_decision_interfaces::msg::BothCampHp>::SharedPtr both_camp_hp_pub;
 
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr tx_status_pub_;
+    uint64_t tx_observation_sequence_ = 0;
+    bool last_command_valid_ = false;
     rclcpp::TimerBase::SharedPtr timer_;
     geometry_msgs::msg::Twist cmd_vel_buffer;
+    std::string serial_port_;
+    double command_timeout_ = 0.25;
+    bool require_localization_health_=false,health_tracking_=false,motion_ready_=false;
+    bool previous_motion_ready_=false,health_session_changed_=false;
+    std::string health_session_;
+    uint64_t health_sequence_=0,health_generation_=0,motion_sequence_=0;
+    std::chrono::steady_clock::time_point health_at_{},motion_ready_at_{};
+    rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr health_sub_;
+    rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr motion_ready_sub_;
+    bool require_odometry_ = false;
+    double odometry_timeout_ = .25;
+    int64_t last_odometry_stamp_ = 0;
+    std::chrono::steady_clock::time_point last_odometry_{};
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
+    std::chrono::steady_clock::time_point last_command_{};
+    std::atomic<bool> discard_command_{false};
     bool new_cmd_vel_received = false;
     bool new_target_stance_received = false;
 

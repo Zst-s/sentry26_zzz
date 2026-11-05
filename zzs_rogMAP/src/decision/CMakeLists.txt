@@ -8,6 +8,8 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(base_interfaces_demo REQUIRED)
 find_package(rm_decision_interfaces REQUIRED)
@@ -39,6 +41,7 @@ target_compile_features(trans_node2 PUBLIC c_std_99 cxx_std_17)  # Require C99 a
 ament_target_dependencies(
   trans_node
   "rclcpp"
+  "rclcpp_action"
   "std_msgs"
   "base_interfaces_demo"
   "rm_decision_interfaces"
@@ -50,7 +53,9 @@ ament_target_dependencies(
 
 ament_target_dependencies(
   trans_node2
+  "diagnostic_msgs"
   "rclcpp"
+  "rclcpp_action"
   "std_msgs"
   "base_interfaces_demo"
   "rm_decision_interfaces"
@@ -114,5 +119,21 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_test REQUIRED)
+  ament_add_test(serial_odometry_pty
+    COMMAND /usr/bin/python3 ${CMAKE_CURRENT_SOURCE_DIR}/test_serial_watchdog.py
+      $<TARGET_FILE:trans_node2> --require-odometry
+    TIMEOUT 25
+    ENV "ROS_DOMAIN_ID=231" "ROS_LOCALHOST_ONLY=1"
+      "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_log"
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+  ament_add_test(serial_watchdog_pty
+    COMMAND /usr/bin/python3 ${CMAKE_CURRENT_SOURCE_DIR}/test_serial_watchdog.py
+      $<TARGET_FILE:trans_node2>
+    TIMEOUT 20
+    ENV "ROS_DOMAIN_ID=231" "ROS_LOCALHOST_ONLY=1"
+      "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_log"
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+endif()
 ament_package()
-

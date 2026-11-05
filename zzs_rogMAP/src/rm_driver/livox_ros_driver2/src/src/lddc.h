@@ -105,7 +105,7 @@ private:
 
   void InitCustomMsg(CustomMsg &livox_msg, const StoragePacket &pkg,
                      uint8_t index);
-  void FillPointsToCustomMsg(CustomMsg &livox_msg, const StoragePacket &pkg);
+  bool FillPointsToCustomMsg(CustomMsg &livox_msg, const StoragePacket &pkg);
   void PublishCustomPointData(const CustomMsg &livox_msg, const uint8_t index);
 
   void InitPclMsg(const StoragePacket &pkg, PointCloud &cloud,

@@ -51,7 +51,7 @@
 
 ## 早期重新构建与启动记录（检查命令含已停用话题）
 
-先用 `Ctrl+C` 停止旧的 launch，避免重复启动雷达、LIO、SLAM 和 RViz。随后在终端执行：
+先用 `Ctrl+C` 停止旧的 launch，避免重复启动雷达、LIO、SLAM 和 RViz。随后在终端执行： 
 
 ```bash
 cd /home/doublegun/zzs_rogMAP

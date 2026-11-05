@@ -38,10 +38,12 @@ endif()
 # Find packages
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
@@ -80,11 +82,13 @@ add_executable(pointlio_mapping src/laserMapping.cpp
                 src/IMU_Processing.cpp)
 
 ament_target_dependencies(pointlio_mapping
+  diagnostic_msgs
   rclcpp
   rclpy
   geometry_msgs
   nav_msgs
   sensor_msgs
+  std_srvs
   visualization_msgs
   pcl_ros
   pcl_conversions
@@ -110,4 +114,18 @@ install(
 # Export dependencies
 ament_export_dependencies(rclcpp rclpy geometry_msgs nav_msgs sensor_msgs pcl_ros pcl_conversions tf2_ros livox_ros_driver2 Eigen3 PCL)
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_point_lio_filter_transaction test/test_point_lio_filter_transaction.cpp)
+  ament_target_dependencies(test_point_lio_filter_transaction sensor_msgs nav_msgs tf2_ros)
+  target_link_libraries(test_point_lio_filter_transaction ${PCL_LIBRARIES})
+  ament_add_gtest(test_point_lio_input_guard test/test_point_lio_input_guard.cpp)
+  ament_add_gtest(test_ivox_failed_query test/test_ivox_failed_query.cpp)
+  target_link_libraries(test_ivox_failed_query ${PCL_LIBRARIES})
+  ament_add_gtest(test_point_lio_frames test/test_point_lio_frames.cpp)
+  ament_target_dependencies(test_point_lio_frames tf2_ros tf2_geometry_msgs)
+  ament_add_gtest(test_point_lio_map_snapshot test/test_point_lio_map_snapshot.cpp)
+  ament_target_dependencies(test_point_lio_map_snapshot geometry_msgs)
+  target_link_libraries(test_point_lio_map_snapshot ${PCL_LIBRARIES})
+endif()
 ament_package()

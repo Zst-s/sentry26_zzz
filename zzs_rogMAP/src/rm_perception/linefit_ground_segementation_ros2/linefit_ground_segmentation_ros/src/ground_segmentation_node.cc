@@ -1,4 +1,7 @@
 #include <memory>
+#include <cmath>
+#include <stdexcept>
+#include <vector>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <pcl/common/transforms.h>
@@ -26,12 +29,32 @@ public:
   GroundSegmentationParams params_;
   std::shared_ptr<GroundSegmentation> segmenter_;
   std::string gravity_aligned_frame_;
+  bool self_filter_enabled_;
+  std::string self_filter_frame_;
+  std::vector<double> self_filter_min_, self_filter_max_;
 };
 
 SegmentationNode::SegmentationNode(const rclcpp::NodeOptions &node_options)
     : Node("ground_segmentation", node_options) {
   gravity_aligned_frame_ =
       this->declare_parameter("gravity_aligned_frame", "gravity_aligned");
+  self_filter_enabled_ = this->declare_parameter("self_filter_enabled", false);
+  self_filter_frame_ = this->declare_parameter("self_filter_frame", "base_link");
+  self_filter_min_ = this->declare_parameter<std::vector<double>>(
+      "self_filter_min", {-0.28, -0.28, 0.0});
+  self_filter_max_ = this->declare_parameter<std::vector<double>>(
+      "self_filter_max", {0.28, 0.28, 0.6});
+  if (self_filter_min_.size() != 3 || self_filter_max_.size() != 3 ||
+      self_filter_frame_.empty()) {
+    throw std::invalid_argument("Self filter requires a frame and xyz bounds");
+  }
+  for (size_t axis = 0; axis < 3; ++axis) {
+    if (!std::isfinite(self_filter_min_[axis]) ||
+        !std::isfinite(self_filter_max_[axis]) ||
+        self_filter_min_[axis] >= self_filter_max_[axis]) {
+      throw std::invalid_argument("Self filter bounds must be finite and min < max");
+    }
+  }
 
   params_.visualize = this->declare_parameter("visualize", params_.visualize);
   params_.n_bins = this->declare_parameter("n_bins", params_.n_bins);
@@ -120,8 +143,38 @@ void SegmentationNode::scanCallback(
       is_original_pc ? cloud : cloud_transformed;
 
   segmenter_->segment(cloud_proc, &labels);
+  // Only filter obstacle output; keep segmentation and ground output unchanged.
+  pcl::PointCloud<pcl::PointXYZ> cloud_body;
+  bool apply_self_filter = false;
+  if (self_filter_enabled_) {
+    try {
+      const auto tf = tf_buffer_->lookupTransform(
+          self_filter_frame_, msg->header.frame_id, msg->header.stamp);
+      Eigen::Affine3d body_from_sensor = Eigen::Affine3d::Identity();
+      body_from_sensor.translate(Eigen::Vector3d(
+          tf.transform.translation.x, tf.transform.translation.y,
+          tf.transform.translation.z));
+      body_from_sensor.rotate(Eigen::Quaterniond(
+          tf.transform.rotation.w, tf.transform.rotation.x,
+          tf.transform.rotation.y, tf.transform.rotation.z));
+      pcl::transformPointCloud(cloud, cloud_body, body_from_sensor);
+      apply_self_filter = true;
+    } catch (const tf2::TransformException &ex) {
+      // Do not silently discard real obstacles when the transform is unavailable.
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+          "Self filter TF unavailable; publishing unfiltered obstacles: %s", ex.what());
+    }
+  }
   pcl::PointCloud<pcl::PointXYZ> ground_cloud, obstacle_cloud;
   for (size_t i = 0; i < cloud.size(); ++i) {
+    if (labels[i] != 1 && apply_self_filter) {
+      const auto &p = cloud_body[i];
+      if (p.x >= self_filter_min_[0] && p.x <= self_filter_max_[0] &&
+          p.y >= self_filter_min_[1] && p.y <= self_filter_max_[1] &&
+          p.z >= self_filter_min_[2] && p.z <= self_filter_max_[2]) {
+        continue;
+      }
+    }
     if (labels[i] == 1)
       ground_cloud.push_back(cloud[i]);
     else

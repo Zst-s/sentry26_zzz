@@ -1,4 +1,5 @@
 #include "li_initialization.h"
+point_lio::InputGuard input_guard;
 bool data_accum_finished = false, data_accum_start = false, online_calib_finish = false, refine_print = false;
 int frame_num_init = 0;
 double time_lag_IMU_wtr_lidar = 0.0, move_start_time = 0.0, online_calib_starts_time = 0.0; //, mean_acc_norm = 9.81;
@@ -27,15 +28,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::SharedPtr &msg)
     // mtx_buffer.lock();
     scan_count ++;
     double preprocess_start_time = omp_get_wtime();
-    if (rclcpp::Time(msg->header.stamp).seconds() < last_timestamp_lidar)
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("li_initialization"), "lidar loop back, clear buffer");
-        // lidar_buffer.shrink_to_fit();
-
-        // mtx_buffer.unlock();
-        // sig_buffer.notify_all();
-        return;
-    }
+    if (!input_guard.lidar(get_time_sec(msg->header.stamp), input_steady_seconds())) return;
 
     last_timestamp_lidar = rclcpp::Time(msg->header.stamp).seconds();
     // printf("check lidar time %f\n", last_timestamp_lidar);
@@ -100,18 +93,16 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::SharedPtr &msg)
 
 void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg) 
 {
+    if (msg->point_num == 0 || msg->point_num != msg->points.size()) {
+        input_guard.reject("discarded invalid CustomMsg point count"); return;
+    }
+    for (const auto &point : msg->points) {
+        if (!input_guard.scan(point.offset_time * 1e-9)) return;
+    }
     // mtx_buffer.lock();
     double preprocess_start_time = omp_get_wtime();
     scan_count ++;
-    if (rclcpp::Time(msg->header.stamp).seconds() < last_timestamp_lidar)
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("li_initialization"), "lidar loop back, clear buffer");
-
-        // mtx_buffer.unlock();
-        // sig_buffer.notify_all();
-        return;
-        // lidar_buffer.shrink_to_fit();
-    }
+    if (!input_guard.lidar(get_time_sec(msg->header.stamp), input_steady_seconds())) return;
 
     last_timestamp_lidar = rclcpp::Time(msg->header.stamp).seconds();    
     // if (abs(last_timestamp_imu - last_timestamp_lidar) > 1.0 && !timediff_set_flg && !imu_deque.empty()) {
@@ -186,16 +177,12 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr &msg_in)
     double timestamp = get_time_sec(msg->header.stamp);
     // printf("time_diff%f, %f, %f\n", last_timestamp_imu - timestamp, last_timestamp_imu, timestamp);
 
-    if (timestamp < last_timestamp_imu)
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("li_initialization"), "imu loop back, clear deque");
-        // imu_deque.shrink_to_fit();
-        // cout << "check time:" << timestamp << ";" << last_timestamp_imu << endl;
-        // printf("time_diff%f, %f, %f\n", last_timestamp_imu - timestamp, last_timestamp_imu, timestamp);
-        
-        // mtx_buffer.unlock();
-        // sig_buffer.notify_all();
-        return;
+    if (!input_guard.imu(timestamp, input_steady_seconds())) return;
+    const auto &a = msg->linear_acceleration;
+    const auto &w = msg->angular_velocity;
+    if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
+        !std::isfinite(w.x) || !std::isfinite(w.y) || !std::isfinite(w.z)) {
+        input_guard.fail("nonfinite IMU measurement"); return;
     }
     imu_deque.emplace_back(msg);
     last_timestamp_imu = timestamp;
@@ -231,7 +218,8 @@ bool sync_packages(MeasureGroup &meas)
                             end_time = pt.curvature;
                         }
                     }
-                    lidar_end_time = meas.lidar_beg_time + end_time / double(1000);
+                    if (!input_guard.scan(end_time / 1000.)) return false;
+            lidar_end_time = meas.lidar_beg_time + end_time / double(1000);
                     meas.lidar_last_time = lidar_end_time;
                 }
                 lidar_pushed = true;
@@ -280,6 +268,7 @@ bool sync_packages(MeasureGroup &meas)
                     end_time = pt.curvature;
                 }
             }
+            if (!input_guard.scan(end_time / 1000.)) return false;
             lidar_end_time = meas.lidar_beg_time + end_time / double(1000);
             // cout << "check time lidar:" << end_time << endl;
             meas.lidar_last_time = lidar_end_time;

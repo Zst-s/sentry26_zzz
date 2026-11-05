@@ -50,14 +50,6 @@ CellType classifyCell(
 
   if (height_delta <= config.surface_height_delta_max) {
     cell.vertical_occupancy_ratio = 1.0F;
-    // A sparse wall or box can return only one height bin in a single XY
-    // column. Its small vertical span alone does not make it ground.
-    if (config.elevated_surface_as_obstacle &&
-        stats.occupied_z_min_abs >= config.elevated_surface_min_z_abs) {
-      cell.raw_reason = ProjectionClassReason::AMBIGUOUS_OCCUPIED;
-      cell.traversable = 0U;
-      return CellType::OCCUPIED;
-    }
     cell.raw_reason = ProjectionClassReason::THIN_SURFACE;
     cell.traversable = 1U;
     return CellType::PASSABLE;
@@ -74,7 +66,12 @@ CellType classifyCell(
     return CellType::OCCUPIED;
   }
 
-  if (height_delta >= config.tunnel_height_delta_min && height_delta <= config.tunnel_height_delta_max &&
+  // Preserve inclusive height bounds after voxel-index multiplication (12 * .05 > .60).
+  const double height_epsilon = 8.0 * std::numeric_limits<double>::epsilon() *
+    std::max({1.0, std::abs(height_delta), std::abs(config.tunnel_height_delta_min),
+      std::abs(config.tunnel_height_delta_max)});
+  if (height_delta + height_epsilon >= config.tunnel_height_delta_min &&
+      height_delta <= config.tunnel_height_delta_max + height_epsilon &&
       vertical_occupancy_ratio <= config.tunnel_occupancy_ratio_max) {
     cell.raw_reason = ProjectionClassReason::HOLLOW_TUNNEL;
     cell.traversable = 1U;

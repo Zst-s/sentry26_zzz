@@ -29,8 +29,10 @@ public:
     declareParameter("topic",
                      rclcpp::ParameterValue(std::string("/terrain/grid")));
     declareParameter("data_timeout", rclcpp::ParameterValue(0.7));
+    declareParameter("marking_only", rclcpp::ParameterValue(false));
     node->get_parameter(name_ + ".enabled", enabled_);
     node->get_parameter(name_ + ".data_timeout", timeout_);
+    node->get_parameter(name_ + ".marking_only", marking_only_);
     std::string topic;
     node->get_parameter(name_ + ".topic", topic);
     if (!(timeout_ > 0.0)) {
@@ -75,7 +77,7 @@ public:
   }
   // 清地图恢复动作不能把真实障碍清成可通行；障碍消失由 ROGMap 射线与衰减决定。
   bool isClearable() override { return false; }
-
+  
   void updateBounds(double, double, double, double *min_x, double *min_y,
                     double *max_x, double *max_y) override {
     working_.reset();
@@ -213,6 +215,9 @@ public:
         if (occupancy < 0 || (occupancy == 0 && unknown)) {
           continue;
         }
+        if (marking_only_ && occupancy == 0) {
+          continue;  // Navigation free observations cannot unlock static unknown cells.
+        }
         const auto cost = toCost(static_cast<int8_t>(occupancy));
         const auto old = master.getCost(i, j);
         // 实时自由空间不能覆盖静态地图里的墙；已观测自由空间可填充未知区域。
@@ -236,7 +241,7 @@ private:
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr latest_, working_;
   std::chrono::steady_clock::time_point received_{};
   std::array<double, 4> previous_{};
-  bool have_previous_{false};
+  bool have_previous_{false}, marking_only_{false};
   double timeout_{0.7}, tx_{0.0}, ty_{0.0}, yaw_{0.0}, c_{1.0}, s_{0.0};
 };
 } // namespace sentry_terrain_bridge

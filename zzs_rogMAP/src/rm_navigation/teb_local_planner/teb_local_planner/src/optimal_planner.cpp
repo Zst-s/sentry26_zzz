@@ -40,8 +40,10 @@
 #include <tf2_ros/buffer_interface.h>
 
 #include "teb_local_planner/optimal_planner.h"
+#include "teb_local_planner/shortest_rotation.h"
 
 #include <map>
+#include <exception>
 // g2o custom edges and vertices for the TEB planner
 #include <teb_local_planner/g2o_types/edge_velocity.h>
 #include <teb_local_planner/g2o_types/edge_velocity_obstacle_ratio.h>
@@ -56,9 +58,24 @@
 
 #include <memory>
 #include <limits>
+#include <sstream>
+#include <map>
+#include <typeinfo>
+#include <algorithm>
 
 namespace teb_local_planner
 {
+
+// The edge attracts orientation only; the final tolerance check below makes it a strict constraint.
+class EdgeGlobalPlanOrientation : public BaseTebUnaryEdge<1, double, VertexPose>
+{
+public:
+  void computeError() override
+  {
+    const auto* vertex = static_cast<const VertexPose*>(_vertices[0]);
+    _error[0] = g2o::normalize_theta(vertex->pose().theta() - _measurement);
+  }
+};
 
 // ============== Implementation ===================
 
@@ -85,6 +102,14 @@ TebOptimalPlanner::~TebOptimalPlanner()
 void TebOptimalPlanner::initialize(nav2_util::LifecycleNode::SharedPtr node, const TebConfig& cfg, ObstContainer* obstacles, TebVisualizationPtr visual, const ViaPointContainer* via_points)
 {    
   node_ = node;
+  if (!node_->has_parameter("teb_diagnostics.enabled"))
+    node_->declare_parameter("teb_diagnostics.enabled", true);
+  if (!node_->has_parameter("teb_diagnostics.watch_xy"))
+    node_->declare_parameter("teb_diagnostics.watch_xy", std::vector<double>{-0.17, 1.55, -0.15, 1.55});
+  if (!node_->has_parameter("teb_diagnostics.watch_radius"))
+    node_->declare_parameter("teb_diagnostics.watch_radius", 0.015);
+  if (!node_->has_parameter("teb_diagnostics.watch_all"))
+    node_->declare_parameter("teb_diagnostics.watch_all", true);
   // init optimizer (set solver and block ordering settings)
   optimizer_ = initOptimizer();
   
@@ -92,18 +117,21 @@ void TebOptimalPlanner::initialize(nav2_util::LifecycleNode::SharedPtr node, con
   obstacles_ = obstacles;
   via_points_ = via_points;
   cost_ = HUGE_VAL;
+  // 默认不偏好顺时针或逆时针旋转
   prefer_rotdir_ = RotType::none;
 
+  //初始化轨迹起点速度
   vel_start_.first = true;
   vel_start_.second.linear.x = 0;
   vel_start_.second.linear.y = 0;
   vel_start_.second.angular.z = 0;
 
+  // 初始化轨迹终点速度
   vel_goal_.first = true;
   vel_goal_.second.linear.x = 0;
   vel_goal_.second.linear.y = 0;
   vel_goal_.second.angular.z = 0;
-  initialized_ = true;
+  initialized_ = true;// 标记 TEB 规划器已完成初始化
 
   setVisualization(visual);
 }
@@ -155,6 +183,26 @@ void TebOptimalPlanner::registerG2OTypes()
   factory->registerType("EDGE_PREFER_ROTDIR", std::make_shared<g2o::HyperGraphElementCreator<EdgePreferRotDir>>());
   return;
 }
+// 类型	作用
+// VertexPose	机器人在某个时刻的位姿 \((x,y,\theta)\)
+// VertexTimeDiff	相邻轨迹位姿之间的时间间隔
+// EdgeTimeOptimal	优化轨迹总耗时
+// EdgeShortestPath	约束路径长度，倾向于更短的路径
+// EdgeVelocity	非全向机器人的速度约束
+// EdgeVelocityHolonomic	全向机器人的速度约束
+// EdgeAcceleration	非全向机器人的加速度约束
+// EdgeAccelerationStart	起点加速度约束
+// EdgeAccelerationGoal	终点加速度约束
+// EdgeAccelerationHolonomic	全向机器人加速度约束
+// EdgeAccelerationHolonomicStart	全向机器人起点加速度约束
+// EdgeAccelerationHolonomicGoal	全向机器人终点加速度约束
+// EdgeKinematicsDiffDrive	差速机器人运动学约束
+// EdgeKinematicsCarlike	汽车式机器人运动学约束
+// EdgeObstacle	障碍物距离约束
+// EdgeInflatedObstacle	障碍物膨胀距离相关约束
+// EdgeDynamicObstacle	动态障碍物避障约束
+// EdgeViaPoint	途经点约束
+// EdgePreferRotDir	偏好旋转方向约束
 
 /*
  * initialize g2o optimizer. Set solver settings here.
@@ -184,6 +232,16 @@ std::shared_ptr<g2o::SparseOptimizer> TebOptimalPlanner::initOptimizer()
 bool TebOptimalPlanner::optimizeTEB(int iterations_innerloop, int iterations_outerloop, bool compute_cost_afterwards,
                                     double obst_cost_scale, double viapoint_cost_scale, bool alternative_time_cost)
 {
+  if (cfg_->trajectory.translation_only && teb_.sizePoses() > 0) {
+    const double yaw = teb_.Pose(0).theta();
+    for (int i=0; i<teb_.sizePoses(); ++i) {
+      teb_.Pose(i).theta() = yaw;
+      teb_.PoseVertex(i)->setYawLocked(true);
+    }
+    // 底盘只平移模型的边界角速度为零，不把云台角速度当作底盘角速度。
+    vel_start_.second.angular.z = 0.0;
+    vel_goal_.second.angular.z = 0.0;
+  }
   if (cfg_->optim.optimization_activate==false) 
     return false;
   
@@ -197,6 +255,16 @@ bool TebOptimalPlanner::optimizeTEB(int iterations_innerloop, int iterations_out
   //                 however, we have not tested this mode intensively yet, so we keep
   //                 the legacy fast mode as default until we finish our tests.
   bool fast_mode = !cfg_->obstacles.include_dynamic_obstacles;
+
+  diagnostic_cycle_ = false;
+  if (node_->get_parameter("teb_diagnostics.enabled").as_bool() &&
+      std::chrono::steady_clock::now() - diagnostic_last_ >= std::chrono::milliseconds(500))
+  {
+    diagnostic_last_ = std::chrono::steady_clock::now();
+    diagnostic_cycle_ = true;
+    ++diagnostic_sequence_;
+    publishOptimizationDiagnostics("input", -1);
+  }
   
   for(int i=0; i<iterations_outerloop; ++i)
   {
@@ -213,7 +281,9 @@ bool TebOptimalPlanner::optimizeTEB(int iterations_innerloop, int iterations_out
         clearGraph();
         return false;
     }
+    if (diagnostic_cycle_) publishOptimizationDiagnostics("before", i);
     success = optimizeGraph(iterations_innerloop, false);
+    if (diagnostic_cycle_) publishOptimizationDiagnostics(success ? "after" : "failed", i);
     if (!success) 
     {
         clearGraph();
@@ -229,7 +299,191 @@ bool TebOptimalPlanner::optimizeTEB(int iterations_innerloop, int iterations_out
     weight_multiplier *= cfg_->optim.weight_adapt_factor;
   }
 
+  if (cfg_->trajectory.follow_global_plan_orientation)
+  {
+    if (orientation_reference_plan_.size() < 2)
+    {
+      optimized_ = false;
+      RCLCPP_ERROR(node_->get_logger(), "Global-plan orientation constraint requires a reference path with at least two poses.");
+      return false;
+    }
+    for (int i = 1; i < teb_.sizePoses() - 1; ++i)
+    {
+      const double target = globalPlanOrientationAt(teb_.Pose(i));
+      const double error = std::abs(g2o::normalize_theta(teb_.Pose(i).theta() - target));
+      if (error > cfg_->trajectory.global_plan_orientation_tolerance)
+      {
+        optimized_ = false;
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+          "Rejecting TEB trajectory: pose %d global-path yaw error %.3f rad exceeds %.3f rad.",
+          i, error, cfg_->trajectory.global_plan_orientation_tolerance);
+        return false;
+      }
+    }
+  }
   return true;
+}
+
+void TebOptimalPlanner::publishOptimizationDiagnostics(const std::string& stage, int iteration)
+{
+  // 这些话题包含优化候选，不代表已通过碰撞检查，绝不能用于驱动机器人。
+  try
+  {
+    if (!diagnostic_markers_)
+    {
+      diagnostic_markers_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+        "teb_diagnostics/markers", rclcpp::QoS(20).best_effort());
+      diagnostic_details_ = node_->create_publisher<std_msgs::msg::String>(
+        "teb_diagnostics/details", rclcpp::QoS(20).best_effort());
+      diagnostic_markers_->on_activate();
+      diagnostic_details_->on_activate();
+    }
+    visualization_msgs::msg::MarkerArray output;
+    visualization_msgs::msg::Marker line;
+    line.header.frame_id = cfg_->map_frame;
+    line.header.stamp = node_->now();
+    std::ostringstream instance;
+    instance << this;
+    line.ns = instance.str() + "/" + stage + "/" + std::to_string(iteration);
+    line.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    line.action = visualization_msgs::msg::Marker::ADD;
+    line.pose.orientation.w = 1.0;
+    line.scale.x = 0.015;
+    line.color.a = 0.9;
+    line.color.r = stage == "before" ? 1.0 : 0.1;
+    line.color.g = stage == "after" ? 1.0 : 0.2;
+    line.color.b = stage == "input" ? 1.0 : 0.1;
+    line.lifetime = rclcpp::Duration::from_seconds(0.6);
+    auto point = [](double x, double y) {
+      geometry_msgs::msg::Point p; p.x = x; p.y = y; return p;
+    };
+    std::ostringstream report;
+    report.precision(9);
+    report << "instance=" << instance.str() << " cycle=" << diagnostic_sequence_
+           << " stage=" << stage << " outer=" << iteration
+           << " stamp_ns=" << node_->now().nanoseconds() << " frame=" << cfg_->map_frame
+           << " initialization=" << diagnostic_initialization_ << "\n";
+    report << "translation_only=" << cfg_->trajectory.translation_only << "\n";
+    // extracted 指进入优化器障碍容器，并不等于原始点云/地图中不存在该障碍。
+    const auto watch_xy = node_->get_parameter("teb_diagnostics.watch_xy").as_double_array();
+    const double watch_radius = node_->get_parameter("teb_diagnostics.watch_radius").as_double();
+    const bool watch_all = node_->get_parameter("teb_diagnostics.watch_all").as_bool();
+    report << "obstacle_input_count=" << (obstacles_ ? obstacles_->size() : 0)
+           << " watch_all=" << watch_all << "\n";
+    // 全量输入只在 input 阶段打印一次；保留质心和几何类型，供跨周期比较。
+    if (watch_all && stage == "input" && obstacles_)
+      for (size_t index = 0; index < obstacles_->size(); ++index)
+      {
+        const auto& obstacle = obstacles_->at(index);
+        const auto c = obstacle->getCentroid();
+        report << "obstacle_input index=" << index << " centroid=" << c.x() << "," << c.y()
+               << " dynamic=" << obstacle->isDynamic() << " type=" << typeid(*obstacle).name() << "\n";
+      }
+    if (watch_xy.size() % 2 || !std::isfinite(watch_radius) || watch_radius <= 0)
+      report << "watch_error invalid_watch_xy_or_radius\n";
+    else for (size_t k = 0; k + 1 < watch_xy.size(); k += 2)
+    {
+      size_t count = 0;
+      double nearest = std::numeric_limits<double>::infinity();
+      if (obstacles_) for (const auto& obstacle : *obstacles_)
+      {
+        const auto center = obstacle->getCentroid();
+        const double d = std::hypot(center.x() - watch_xy[k], center.y() - watch_xy[k+1]);
+        nearest = std::min(nearest, d);
+        if (d <= watch_radius) {
+          ++count;
+          report << "watch_candidate target=" << k/2 << " centroid=" << center.x() << "," << center.y() << "\n";
+        }
+      }
+      report << "watch_input target=" << k/2 << " xy=" << watch_xy[k] << "," << watch_xy[k+1]
+             << " radius=" << watch_radius << " extracted=" << (count > 0)
+             << " matches=" << count << " nearest_centroid_distance=" << nearest << "\n";
+    }
+    if (stage != "input") report << diagnostic_obstacle_decisions_;
+    for (int i = 0; i < teb_.sizePoses(); ++i)
+    {
+      const auto& pose = teb_.Pose(i);
+      line.points.push_back(point(pose.x(), pose.y()));
+      report << "pose " << i << " " << pose.x() << " " << pose.y() << " " << pose.theta();
+      if (i < teb_.sizeTimeDiffs()) report << " dt=" << teb_.TimeDiff(i);
+      report << "\n";
+    }
+    output.markers.push_back(line);
+    auto associations = line;
+    associations.id = 1;
+    associations.type = visualization_msgs::msg::Marker::LINE_LIST;
+    associations.scale.x = 0.005;
+    associations.color.r = 1.0; associations.color.g = 0.7; associations.color.b = 0.0;
+    associations.points.clear();
+    auto via_links = associations;
+    via_links.id = 2;
+    via_links.color.r = 0.8; via_links.color.g = 0.0; via_links.color.b = 1.0;
+    std::map<std::string, double> costs;
+    // 从真正建立的优化边读取关联，避免把候选障碍误当作已参与优化的障碍。
+    for (auto* raw_edge : optimizer_->edges())
+    {
+      auto* edge = dynamic_cast<g2o::OptimizableGraph::Edge*>(raw_edge);
+      if (!edge) continue;
+      edge->computeError();
+      costs[typeid(*edge).name()] += edge->chi2();
+      const Obstacle* obstacle = nullptr;
+      if (auto* e = dynamic_cast<EdgeObstacle*>(edge)) obstacle = e->measurement();
+      if (auto* e = dynamic_cast<EdgeInflatedObstacle*>(edge)) obstacle = e->measurement();
+      auto* pose_vertex = dynamic_cast<VertexPose*>(edge->vertex(0));
+      if (!pose_vertex) continue;
+      int pose_index = -1;
+      for (int i = 0; i < teb_.sizePoses(); ++i)
+        if (teb_.PoseVertex(i) == pose_vertex) { pose_index = i; break; }
+      const auto& pose = pose_vertex->pose();
+      if (obstacle)
+      {
+        const auto center = obstacle->getCentroid();
+        associations.points.push_back(point(pose.x(), pose.y()));
+        associations.points.push_back(point(center.x(), center.y()));
+        report << "obstacle_link pose=" << pose_index << " centroid=" << center.x() << ","
+               << center.y() << " footprint_distance="
+               << cfg_->robot_model->calculateDistance(pose, obstacle) << "\n";
+      }
+      if (auto* e = dynamic_cast<EdgeViaPoint*>(edge))
+      {
+        const auto* vp = e->measurement();
+        via_links.points.push_back(point(pose.x(), pose.y()));
+        via_links.points.push_back(point(vp->x(), vp->y()));
+        report << "via_link pose=" << pose_index << " xy=" << vp->x() << "," << vp->y() << "\n";
+      }
+    }
+    output.markers.push_back(associations);
+    output.markers.push_back(via_links);
+    auto inputs = line;
+    inputs.id = 3;
+    inputs.type = visualization_msgs::msg::Marker::POINTS;
+    inputs.scale.x = inputs.scale.y = 0.025;
+    inputs.color.r = inputs.color.g = inputs.color.b = 1.0;
+    inputs.points.clear();
+    if (obstacles_) for (const auto& obstacle : *obstacles_)
+    {
+      const auto center = obstacle->getCentroid();
+      inputs.points.push_back(point(center.x(), center.y()));
+    }
+    output.markers.push_back(inputs);
+    if (stage == "input")
+      for (const auto& p : diagnostic_reference_plan_)
+        report << "reference_pose " << p.pose.position.x << " " << p.pose.position.y
+               << " quaternion=" << p.pose.orientation.x << "," << p.pose.orientation.y
+               << "," << p.pose.orientation.z << "," << p.pose.orientation.w << "\n";
+    if (via_points_) for (const auto& vp : *via_points_)
+      report << "via_input " << vp.x() << " " << vp.y() << "\n";
+    for (const auto& cost : costs)
+      report << "weighted_chi2 " << cost.first << " " << cost.second << "\n";
+    std_msgs::msg::String details;
+    details.data = report.str();
+    diagnostic_markers_->publish(output);
+    diagnostic_details_->publish(details);
+  }
+  catch (const std::exception& ex)
+  {
+    RCLCPP_WARN(node_->get_logger(), "TEB diagnostic publication failed: %s", ex.what());
+  }
 }
 
 void TebOptimalPlanner::setVelocityStart(const geometry_msgs::msg::Twist& vel_start)
@@ -249,24 +503,71 @@ void TebOptimalPlanner::setVelocityGoal(const geometry_msgs::msg::Twist& vel_goa
 bool TebOptimalPlanner::plan(const std::vector<geometry_msgs::msg::PoseStamped>& initial_plan, const geometry_msgs::msg::Twist* start_vel, bool free_goal_vel)
 {    
   TEB_ASSERT_MSG(initialized_, "Call initialize() first.");
+  if (initial_plan.size() < 2) return false;
+  if (cfg_->trajectory.translation_only &&
+      (cfg_->robot.max_vel_y <= 0 || cfg_->robot.cmd_angle_instead_rotvel ||
+       cfg_->hcp.enable_homotopy_class_planning || cfg_->trajectory.follow_global_plan_orientation)) {
+    RCLCPP_ERROR(node_->get_logger(), "translation_only requires holonomic motion, no car steering, no homotopy, and follow_global_plan_orientation=false");
+    return false;
+  }
+  if (previous_translation_only_ != cfg_->trajectory.translation_only)
+    teb_.clearTimedElasticBand();
+  previous_translation_only_ = cfg_->trajectory.translation_only;
+  orientation_reference_plan_ = initial_plan;
+  // The controller replaces the first plan pose with the measured robot pose.
+  // Its yaw is not the global planner's yaw, so use the next reference yaw there.
+  orientation_reference_plan_.front().pose.orientation = initial_plan[1].pose.orientation;
+  if (cfg_->trajectory.follow_global_plan_orientation && !previous_follow_global_plan_orientation_)
+    teb_.clearTimedElasticBand(); // do not reuse a trajectory optimized without the yaw constraint
+  previous_follow_global_plan_orientation_ = cfg_->trajectory.follow_global_plan_orientation;
+  const bool shortest_rotation = cfg_->trajectory.shortest_rotation_initialization && !cfg_->trajectory.translation_only;
+  if (shortest_rotation &&
+      (cfg_->robot.max_vel_y <= 0.0 || cfg_->trajectory.follow_global_plan_orientation))
+  {
+    RCLCPP_ERROR(node_->get_logger(),
+      "shortest_rotation_initialization requires a holonomic robot and follow_global_plan_orientation=false.");
+    return false;
+  }
+  if (shortest_rotation != previous_shortest_rotation_initialization_)
+    teb_.clearTimedElasticBand(); // discard the previous mode's angular branch
+  previous_shortest_rotation_initialization_ = shortest_rotation;
+  diagnostic_initialization_ = shortest_rotation ? "shortest_rotation_fresh" : "fresh";
+  // Keep reference poses unchanged in the diagnostics. Only the initialization
+  // seed is changed; optimizer constraints and subsequent collision checks remain active.
+  auto seed_plan = shortest_rotation ? makeShortestRotationPlan(initial_plan) : initial_plan;
+  if (cfg_->trajectory.translation_only) {
+    const double yaw = PoseSE2(initial_plan.front().pose).theta();
+    for (auto& point : seed_plan) {
+      point.pose.orientation.x = point.pose.orientation.y = 0.0;
+      point.pose.orientation.z = std::sin(yaw/2);
+      point.pose.orientation.w = std::cos(yaw/2);
+    }
+  }
+  const bool estimate_orientation = !cfg_->trajectory.translation_only && !shortest_rotation && cfg_->trajectory.global_plan_overwrite_orientation;
+  if (node_->get_parameter("teb_diagnostics.enabled").as_bool())
+    diagnostic_reference_plan_ = initial_plan;
   if (!teb_.isInit())
   {
-    teb_.initTrajectoryToGoal(initial_plan, cfg_->robot.max_vel_x, cfg_->robot.max_vel_theta, cfg_->trajectory.global_plan_overwrite_orientation,
+    teb_.initTrajectoryToGoal(seed_plan, cfg_->robot.max_vel_x, cfg_->robot.max_vel_theta, estimate_orientation,
       cfg_->trajectory.min_samples, cfg_->trajectory.allow_init_with_backwards_motion);
   }
   else // warm start
   {
-    PoseSE2 start_(initial_plan.front().pose);
-    PoseSE2 goal_(initial_plan.back().pose);
+    PoseSE2 start_(seed_plan.front().pose);
+    PoseSE2 goal_(seed_plan.back().pose);
     if (teb_.sizePoses()>0
         && (goal_.position() - teb_.BackPose().position()).norm() < cfg_->trajectory.force_reinit_new_goal_dist
         && fabs(g2o::normalize_theta(goal_.theta() - teb_.BackPose().theta())) < cfg_->trajectory.force_reinit_new_goal_angular) // actual warm start!
+    {
+      diagnostic_initialization_ = "warm_start";
       teb_.updateAndPruneTEB(start_, goal_, cfg_->trajectory.min_samples); // update TEB
+    }
     else // goal too far away -> reinit
     {
       RCLCPP_DEBUG(node_->get_logger(), "New goal: distance to existing goal is higher than the specified threshold. Reinitalizing trajectories.");
       teb_.clearTimedElasticBand();
-      teb_.initTrajectoryToGoal(initial_plan, cfg_->robot.max_vel_x, cfg_->robot.max_vel_theta, cfg_->trajectory.global_plan_overwrite_orientation,
+      diagnostic_initialization_ = shortest_rotation ? "shortest_rotation_goal_reinit" : "goal_reinit";
+      teb_.initTrajectoryToGoal(seed_plan, cfg_->robot.max_vel_x, cfg_->robot.max_vel_theta, estimate_orientation,
         cfg_->trajectory.min_samples, cfg_->trajectory.allow_init_with_backwards_motion);
     }
   }
@@ -290,8 +591,23 @@ bool TebOptimalPlanner::plan(const std::vector<geometry_msgs::msg::PoseStamped>&
 //}
 
 bool TebOptimalPlanner::plan(const PoseSE2& start, const PoseSE2& goal, const geometry_msgs::msg::Twist* start_vel, bool free_goal_vel)
-{	
+{
   TEB_ASSERT_MSG(initialized_, "Call initialize() first.");
+  if (cfg_->trajectory.translation_only) {
+    std::vector<geometry_msgs::msg::PoseStamped> plan(2);
+    start.toPoseMsg(plan.front().pose);
+    goal.toPoseMsg(plan.back().pose);
+    return this->plan(plan, start_vel, free_goal_vel);
+  }
+  if (previous_translation_only_) {
+    teb_.clearTimedElasticBand();
+    previous_translation_only_ = false;
+  }
+  orientation_reference_plan_.clear();
+  if (cfg_->trajectory.follow_global_plan_orientation)
+    return false; // this overload has no global path orientations to follow
+  diagnostic_initialization_ = teb_.isInit() ? "pose_api_existing" : "pose_api_fresh";
+  diagnostic_reference_plan_.clear();
   if (!teb_.isInit())
   {
     // init trajectory
@@ -331,6 +647,11 @@ bool TebOptimalPlanner::buildGraph(double weight_multiplier)
   }
 
   optimizer_->setComputeBatchStatistics(cfg_->recovery.divergence_detection_enable);
+  // autoResize 新增的顶点也必须锁住 yaw。关闭模式时恢复正常更新。
+  for (int i=0; i<teb_.sizePoses(); ++i) {
+    teb_.PoseVertex(i)->setYawLocked(cfg_->trajectory.translation_only);
+    if (cfg_->trajectory.translation_only) teb_.Pose(i).theta() = teb_.Pose(0).theta();
+  }
   
   // add TEB vertices
   AddTEBVertices();
@@ -345,6 +666,8 @@ bool TebOptimalPlanner::buildGraph(double weight_multiplier)
     AddEdgesDynamicObstacles();
   
   AddEdgesViaPoints();
+
+  AddEdgesGlobalPlanOrientation();
   
   AddEdgesVelocity();
   
@@ -354,12 +677,14 @@ bool TebOptimalPlanner::buildGraph(double weight_multiplier)
 
   AddEdgesShortestPath();
   
+  if (!cfg_->trajectory.translation_only) {
   if (cfg_->robot.min_turning_radius == 0 || cfg_->optim.weight_kinematics_turning_radius == 0)
     AddEdgesKinematicsDiffDrive(); // we have a differential drive robot
   else
     AddEdgesKinematicsCarlike(); // we have a carlike robot since the turning radius is bounded from below.
 
   AddEdgesPreferRotDir();
+  }
 
   if (cfg_->optim.weight_velocity_obstacle_ratio > 0)
     AddEdgesVelocityObstacleRatio();
@@ -445,8 +770,28 @@ void TebOptimalPlanner::AddTEBVertices()
 
 void TebOptimalPlanner::AddEdgesObstacles(double weight_multiplier)
 {
+  diagnostic_obstacle_decisions_.clear();
+  std::ostringstream decisions;
+  decisions.precision(9);
+  const auto watched = diagnostic_cycle_ ? node_->get_parameter("teb_diagnostics.watch_xy").as_double_array() : std::vector<double>{};
+  const double radius = diagnostic_cycle_ ? node_->get_parameter("teb_diagnostics.watch_radius").as_double() : 0.0;
+  const bool watch_all = diagnostic_cycle_ && node_->get_parameter("teb_diagnostics.watch_all").as_bool();
+  auto is_watched = [&](const ObstaclePtr& obstacle) {
+    if (watch_all) return true;
+    const auto c = obstacle->getCentroid();
+    for (size_t k = 0; k + 1 < watched.size(); k += 2)
+      if (std::hypot(c.x()-watched[k], c.y()-watched[k+1]) <= radius) return true;
+    return false;
+  };
   if (cfg_->optim.weight_obstacle==0 || weight_multiplier==0 || obstacles_==nullptr )
-    return; // if weight equals zero skip adding edges!
+  {
+    if (diagnostic_cycle_) diagnostic_obstacle_decisions_ = "watch_build skipped=zero_weight_or_null_container\n";
+    return;
+  }
+  if (diagnostic_cycle_) decisions << "watch_build distance_basis=footprint force_distance="
+      << cfg_->obstacles.min_obstacle_dist*cfg_->obstacles.obstacle_association_force_inclusion_factor
+      << " cutoff_distance=" << cfg_->obstacles.min_obstacle_dist*cfg_->obstacles.obstacle_association_cutoff_factor
+      << " first_last_pose_edges=skipped decisions_at=graph_build\n";
     
   
   bool inflated = cfg_->obstacles.inflation_dist > cfg_->obstacles.min_obstacle_dist;
@@ -535,6 +880,25 @@ void TebOptimalPlanner::AddEdgesObstacles(double weight_multiplier)
       if (right_obstacle)
         iter_obstacle->push_back(right_obstacle);
 
+      if (diagnostic_cycle_) for (size_t obstacle_index = 0; obstacle_index < obstacles_->size(); ++obstacle_index)
+      {
+        const auto& obstacle = obstacles_->at(obstacle_index);
+        if (!is_watched(obstacle)) continue;
+        const auto c = obstacle->getCentroid();
+        const double d = cfg_->robot_model->calculateDistance(teb_.Pose(i), obstacle.get());
+        const bool selected = std::find(iter_obstacle->begin(), iter_obstacle->end(), obstacle) != iter_obstacle->end();
+        const char* reason = "not_nearest_on_side";
+        if (cfg_->obstacles.include_dynamic_obstacles && obstacle->isDynamic()) reason = "handled_by_dynamic_edges";
+        else if (d < cfg_->obstacles.min_obstacle_dist*cfg_->obstacles.obstacle_association_force_inclusion_factor) reason = "force_inclusion";
+        else if (d > cfg_->obstacles.min_obstacle_dist*cfg_->obstacles.obstacle_association_cutoff_factor) reason = "beyond_cutoff";
+        else if (selected) reason = "nearest_on_side";
+        if (i == 0) reason = "first_pose_edge_skipped";
+        decisions << "watch_association pose=" << i << " obstacle_index=" << obstacle_index
+                  << " centroid=" << c.x() << "," << c.y()
+                  << " footprint_distance_at_build=" << d << " edge_added=" << (selected && i != 0)
+                  << " reason=" << reason << "\n";
+      }
+
       // continue here to ignore obstacles for the first pose, but use them later to create the EdgeVelocityObstacleRatio edges
       if (i == 0)
       {
@@ -547,11 +911,13 @@ void TebOptimalPlanner::AddEdgesObstacles(double weight_multiplier)
         create_edge(i, obst.get());
       ++iter_obstacle;
   }
+  if (diagnostic_cycle_) diagnostic_obstacle_decisions_ = decisions.str();
 }
 
 
 void TebOptimalPlanner::AddEdgesObstaclesLegacy(double weight_multiplier)
 {
+  diagnostic_obstacle_decisions_ = diagnostic_cycle_ ? "watch_build legacy_mode=1 per_pose_reasons_not_available_use_obstacle_link\n" : "";
   if (cfg_->optim.weight_obstacle==0 || weight_multiplier==0 || obstacles_==nullptr)
     return; // if weight equals zero skip adding edges!
 
@@ -716,6 +1082,48 @@ void TebOptimalPlanner::AddEdgesViaPoints()
     edge_viapoint->setInformation(information);
     edge_viapoint->setParameters(*cfg_, &(*vp_it));
     optimizer_->addEdge(edge_viapoint);   
+  }
+}
+
+double TebOptimalPlanner::globalPlanOrientationAt(const PoseSE2& pose) const
+{
+  const auto& plan = orientation_reference_plan_;
+  double best_distance_sq = std::numeric_limits<double>::infinity();
+  double best_yaw = tf2::getYaw(plan.front().pose.orientation);
+  const Eigen::Vector2d query = pose.position();
+  for (size_t i = 1; i < plan.size(); ++i)
+  {
+    const Eigen::Vector2d a(plan[i - 1].pose.position.x, plan[i - 1].pose.position.y);
+    const Eigen::Vector2d b(plan[i].pose.position.x, plan[i].pose.position.y);
+    const Eigen::Vector2d segment = b - a;
+    const double length_sq = segment.squaredNorm();
+    const double fraction = length_sq > 1e-12
+      ? std::clamp((query - a).dot(segment) / length_sq, 0.0, 1.0) : 0.0;
+    const double distance_sq = (query - a - fraction * segment).squaredNorm();
+    if (distance_sq < best_distance_sq)
+    {
+      best_distance_sq = distance_sq;
+      const double yaw_a = tf2::getYaw(plan[i - 1].pose.orientation);
+      const double yaw_b = tf2::getYaw(plan[i].pose.orientation);
+      best_yaw = g2o::normalize_theta(yaw_a + fraction * g2o::normalize_theta(yaw_b - yaw_a));
+    }
+  }
+  return best_yaw;
+}
+
+void TebOptimalPlanner::AddEdgesGlobalPlanOrientation()
+{
+  if (!cfg_->trajectory.follow_global_plan_orientation || orientation_reference_plan_.size() < 2)
+    return;
+  Eigen::Matrix<double, 1, 1> information;
+  information[0] = 1000.0;
+  for (int i = 1; i < teb_.sizePoses() - 1; ++i)
+  {
+    auto* edge = new EdgeGlobalPlanOrientation;
+    edge->setVertex(0, teb_.PoseVertex(i));
+    edge->setMeasurement(globalPlanOrientationAt(teb_.Pose(i)));
+    edge->setInformation(information);
+    optimizer_->addEdge(edge);
   }
 }
 
@@ -1252,6 +1660,8 @@ void TebOptimalPlanner::getFullTrajectory(std::vector<teb_msgs::msg::TrajectoryP
 bool TebOptimalPlanner::isTrajectoryFeasible(dwb_critics::ObstacleFootprintCritic* costmap_model, const std::vector<geometry_msgs::msg::Point>& footprint_spec,
                                              double inscribed_radius, double circumscribed_radius, int look_ahead_idx, double feasibility_check_lookahead_distance)
 {
+  // Steady clock keeps diagnostic throttling independent of ROS simulation time.
+  static rclcpp::Clock diagnostic_clock(RCL_STEADY_TIME);
   if (look_ahead_idx < 0 || look_ahead_idx >= teb().sizePoses())
     look_ahead_idx = teb().sizePoses() - 1;
 
@@ -1270,6 +1680,11 @@ bool TebOptimalPlanner::isTrajectoryFeasible(dwb_critics::ObstacleFootprintCriti
   {
     teb().Pose(i).toPoseMsg(pose2d);
     if (!isPoseValid(pose2d, costmap_model, footprint_spec)){
+      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("teb_feasibility"), diagnostic_clock, 1000,
+          "[TEB_FEASIBILITY] sample=%d/%d checked_last=%d frame=%s "
+          "x=%.4f y=%.4f yaw=%.4f footprint_vertices=%zu inscribed=%.4f circumscribed=%.4f",
+          i, static_cast<int>(teb().sizePoses()), look_ahead_idx, cfg_->map_frame.c_str(),
+          pose2d.x, pose2d.y, pose2d.theta, footprint_spec.size(), inscribed_radius, circumscribed_radius);
       if (visualization_)
       {
         visualization_->publishInfeasibleRobotPose(teb().Pose(i), *cfg_->robot_model);
@@ -1297,6 +1712,11 @@ bool TebOptimalPlanner::isTrajectoryFeasible(dwb_critics::ObstacleFootprintCriti
           intermediate_pose.toPoseMsg(pose2d);
 
           if (!isPoseValid(pose2d, costmap_model, footprint_spec)){
+            RCLCPP_WARN_THROTTLE(rclcpp::get_logger("teb_feasibility"), diagnostic_clock, 1000,
+                "[TEB_FEASIBILITY] segment=%d->%d interpolated=%d/%d frame=%s "
+                "x=%.4f y=%.4f yaw=%.4f footprint_vertices=%zu inscribed=%.4f circumscribed=%.4f",
+                i, i + 1, step + 1, n_additional_samples, cfg_->map_frame.c_str(),
+                pose2d.x, pose2d.y, pose2d.theta, footprint_spec.size(), inscribed_radius, circumscribed_radius);
             if (visualization_)
             {
               visualization_->publishInfeasibleRobotPose(intermediate_pose, *cfg_->robot_model);
@@ -1313,11 +1733,25 @@ bool TebOptimalPlanner::isTrajectoryFeasible(dwb_critics::ObstacleFootprintCriti
 bool TebOptimalPlanner::isPoseValid(geometry_msgs::msg::Pose2D pose2d, dwb_critics::ObstacleFootprintCritic* costmap_model,
                            const std::vector<geometry_msgs::msg::Point>& footprint_spec)
 {
+  static rclcpp::Clock diagnostic_clock(RCL_STEADY_TIME);
   try {
-    if ( costmap_model->scorePose(pose2d, dwb_critics::getOrientedFootprint(pose2d, footprint_spec)) < 0 ) {
+    const double score = costmap_model->scorePose(
+        pose2d, dwb_critics::getOrientedFootprint(pose2d, footprint_spec));
+    if (score < 0) {
+      RCLCPP_WARN_THROTTLE(rclcpp::get_logger("teb_feasibility"), diagnostic_clock, 1000,
+          "[TEB_FEASIBILITY] negative_score=%.4f frame=%s x=%.4f y=%.4f yaw=%.4f",
+          score, cfg_->map_frame.c_str(), pose2d.x, pose2d.y, pose2d.theta);
       return false;
     }
+  } catch (const std::exception &ex) {
+    RCLCPP_WARN_THROTTLE(rclcpp::get_logger("teb_feasibility"), diagnostic_clock, 1000,
+        "[TEB_FEASIBILITY] critic_exception='%s' frame=%s x=%.4f y=%.4f yaw=%.4f",
+        ex.what(), cfg_->map_frame.c_str(), pose2d.x, pose2d.y, pose2d.theta);
+    return false;
   } catch (...) {
+    RCLCPP_WARN_THROTTLE(rclcpp::get_logger("teb_feasibility"), diagnostic_clock, 1000,
+        "[TEB_FEASIBILITY] unknown_exception frame=%s x=%.4f y=%.4f yaw=%.4f",
+        cfg_->map_frame.c_str(), pose2d.x, pose2d.y, pose2d.theta);
     return false;
   }
   return true;

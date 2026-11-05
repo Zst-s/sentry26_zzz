@@ -408,9 +408,6 @@ void ROGMap::refreshLayers()
   layer_cfg.unknown_as_occupied = cfg_.unknown_as_occupied;
   layer_cfg.min_observed_voxels = cfg_.min_observed_voxels;
   layer_cfg.surface_height_delta_max = cfg_.surface_height_delta_max;
-  layer_cfg.elevated_surface_as_obstacle = cfg_.elevated_surface_as_obstacle;
-  layer_cfg.elevated_surface_min_z_abs =
-    getRobotState().p.z() + cfg_.elevated_surface_min_z_rel;
   layer_cfg.wall_height_delta_min = cfg_.wall_height_delta_min;
   layer_cfg.wall_occupancy_ratio_min = cfg_.wall_occupancy_ratio_min;
   layer_cfg.tunnel_height_delta_min = cfg_.tunnel_height_delta_min;

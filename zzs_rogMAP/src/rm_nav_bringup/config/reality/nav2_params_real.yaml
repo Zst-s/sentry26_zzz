@@ -146,6 +146,9 @@ controller_server:
       max_vel_theta: 2.5                   #最大转向角速度
       acc_lim_x: 1.8      # 0.1                        #最大平移加速度
       acc_lim_theta: 1.8                  #最大角加速度
+      footprint_model:
+        type: polygon
+        vertices: "[[-0.32, -0.29], [0.30, -0.29], [0.30, 0.29], [-0.32, 0.29]]"
       is_footprint_dynamic: False           #如果为真，在检查轨迹可行性之前更新足迹
       use_proportional_saturation: False    #如果为true，则按比例减少所有扭曲分量（线性x和y以及角度z）（如果任何扭曲分量超过其相应的界限），而不是单独饱和每个扭曲分量
       transform_tolerance: 0.5              #在TF树中查询转换时的容差（秒）
@@ -153,7 +156,7 @@ controller_server:
       #*******************************************************************************
       # Robot/Carlike 此部分参数仅适用于类似汽车的机器人（如差速驱动机器人）
       #*******************************************************************************
-      min_turning_radius: 0.7             #机器人的最小转弯半径。对于差速驱动机器人，此值为0
+      min_turning_radius: 0.0             #机器人的最小转弯半径。对于差速驱动机器人，此值为0
       wheelbase: 1.0                      #驱动轮轴与转向轮轴之间的距离。后轮驱动机器人此值可能为负数。
       cmd_angle_instead_rotvel: False     #是否用转向角代替控制指令消息中的旋转速度（需要结合轴距参数使用）
 
@@ -170,7 +173,7 @@ controller_server:
       #*******************************************************************************
       # Obstacles 障碍物
       #*******************************************************************************
-      min_obstacle_dist: 0.45    # 0.25                     #机器人与障碍物之间最小的期望间隔距离
+      min_obstacle_dist: 0.02    # 多边形已包含车体，额外间距 2 cm；需实车核验。
       inflation_dist: 0.5                         #障碍物周围的缓冲区，用于增加安全裕度。此缓冲区内具有非零的惩罚代价
       dynamic_obstacle_inflation_dist: 0.5        #具有非零惩罚成本的动态障碍物预测位置周围的缓冲区（应大于min_obstacle_dist才能生效)
       include_dynamic_obstacles: True             #预测动态障碍物周围的缓冲区，用于增加安全裕度。此缓冲区内具有非零的惩罚代价
@@ -266,7 +269,8 @@ local_costmap:
       width: 5
       height: 5
       resolution: 0.02
-      robot_radius: 0.27
+      footprint: "[[-0.32, -0.29], [0.30, -0.29], [0.30, 0.29], [-0.32, 0.29]]"
+      footprint_padding: 0.01
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -297,7 +301,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: False
-      robot_radius: 0.28
+      footprint: "[[-0.32, -0.29], [0.30, -0.29], [0.30, 0.29], [-0.32, 0.29]]"
+      footprint_padding: 0.01
       resolution: 0.02
       track_unknown_space: true
       # 彻底移除 stvl_layer（enabled:false 未生效，ground_segmentation 误检的 1.7w 障碍点仍污染 costmap 导致 planner 失败）

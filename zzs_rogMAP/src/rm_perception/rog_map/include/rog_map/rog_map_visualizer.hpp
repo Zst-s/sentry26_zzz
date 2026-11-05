@@ -24,7 +24,7 @@ public:
       layer_height_delta_pub, field_pub, decay_cells_pub;
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr layer_value_pub,
       layer_value_dynamic_pub, layer_value_static_pub, layer_type_pub, layer_confidence_pub;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr mkr_arr_pub;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr mkr_arr_pub, reason_pub;
   };
 
   ROGMapVisualizer() = default;

@@ -13,7 +13,7 @@ amcl:
     do_beamskip: false
     global_frame_id: "map"
     lambda_short: 0.1
-    laser_likelihood_max_dist: 2.0
+    laser_likelihood_max_dist: 2.0        
     laser_max_range: 100.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
@@ -90,11 +90,12 @@ bt_navigator:
 
 controller_server:
   ros__parameters:
+    odom_topic: /navigation/odometry
     # use_imu: True
     # slope_threshold: 0.05
     use_sim_time: False
     controller_frequency: 40.0
-    min_x_velocity_threshold: 0.001
+    min_x_velocity_threshold: 0.01
     min_y_velocity_threshold: 0.1
     min_theta_velocity_threshold: 0.001
     failure_tolerance: 0.3
@@ -108,26 +109,37 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.4
+      xy_goal_tolerance: 0.2
       yaw_goal_tolerance: 6.28
     FollowPath:
       plugin: teb_local_planner::TebLocalPlannerROS
       # https://github.com/rst-tu-dortmund/teb_local_planner/tree/ros2-master
-
+      # 仅全向底盘：固定每轮实测底盘朝向，只优化平移和时间；需要真实底盘 TF。
+      # 忽略目标朝向和 shortest_rotation_initialization；不能与严格朝向/同伦模式并用。
+      translation_only: True
+      # 末端平滑限速：v上限 = max_speed * min(1, 到完整路径终点距离 / distance)。
+      # 仅限制输出，不保证加速度连续，也不能解决低速蠕动；默认关闭。
+      goal_approach_enabled: True
+      goal_approach_distance: 1.0       # m，减速区域半径，必须 > 0
+      goal_approach_max_speed: 1.0      # m/s，合成平移速度上限，仍服从原有各轴限速
+      follow_global_plan_orientation: False          #默认关闭；开启后约束中间位姿朝向与全局路径一致，误差超限则拒绝轨迹
+      shortest_rotation_initialization: True         #全向车：按起终点最短转角初始化，避免中间yaw=0诱导绕一整圈；要求上项及同伦规划关闭
+      global_plan_orientation_tolerance: 0.1 
       #*******************************************************************************
       # Trajectory
       #*******************************************************************************
       teb_autosize: 1.0                             #是否自动调整轨迹大小。根据时间分辨率自动调整轨迹大小
-      dt_ref: 0.6                                   #轨迹的期望时间分辨率（应该与底层控制速率的数量级相符）
-      dt_hysteresis: 0.06                           #自动调整大小的滞后（根据当前时间分辨率 dt）：通常为 dt_ref 的 10%
+      dt_ref: 0.4 #轨迹的期望时间分辨率（应该与底层控制速率的数量级相符）
+      dt_hysteresis: 0.1 #自动调整大小的滞后（根据当前时间分辨率 dt）：通常为 dt_ref 的 10%
       max_samples: 500                              #最大样本数量；警告：如果太小，离散化/分辨率可能不足以用于给定的机器人模型，或者避障不再有效。
-      global_plan_overwrite_orientation: False      #覆盖全局规划器提供的局部子目标的方向
+      global_plan_overwrite_orientation: true #覆盖全局规划器提供的局部子目标的方向
       allow_init_with_backwards_motion: True        #如果为真，基础轨迹可能会以后退运动初始化，以防目标在本地代价地图中位于起点之后（仅当机器人配备后部传感器时推荐）
       max_global_plan_lookahead_dist: 2.0           #指定用于优化考虑的全局规划子集的最大长度（累积欧氏距离）[如果 <=0：禁用；长度也受到本地代价地图大小的限制！
       force_reinit_new_goal_dist: 1.0               #如果之前的目标更新距离超过此值，则强制规划器重新初始化轨迹
       force_reinit_new_goal_angular: 0.78           #如果之前的目标更新的角度超过此弧度值，则强制规划器重新初始化轨迹
-      feasibility_check_no_poses: 0                 #在预测路径上，每个采样间隔需要检查可行性的姿态数目
-      feasibility_check_lookahead_distance: 1.5     #每个采样间隔需要检查可行性的距离（以及feasibility_check_no_poses之下的索引）与机器人之间的距离。-1检查所有姿势，直到feasibility_check_no_poses。https://robotics.stackexchange.com/questions/80845/what-are-reasons-for-teb-planners-feasibility-check-to-fail
+      feasibility_check_no_poses: -1 # 检查完整局部轨迹
+      feasibility_check_lookahead_distance: -1.0 # 不截断最终碰撞检查距离
+      min_resolution_collision_check_angular: 0.0017453292519943296  # 0.1 degree; whole-band interpolation
       exact_arc_length: False                       #如果为真，规划器在速度、加速度和转向率计算中使用准确的弧长 [-> 增加 CPU 时间]，否则使用欧氏近似。
       publish_feedback: False                       #发布包含完整轨迹和活动障碍物列表的规划器反馈（应仅用于评估或调试目的）
       visualize_with_time_as_z_axis_scale: 0.0      #在rviz里可看到优化使用的graph
@@ -141,11 +153,14 @@ controller_server:
       #*******************************************************************************
       # Robot
       #*******************************************************************************
-      max_vel_x: 2.5                        #最大平移速度
-      max_vel_x_backwards: 2.5              #最大后退速度
-      max_vel_theta: 2.5                   #最大转向角速度
-      acc_lim_x: 1.8      # 0.1                        #最大平移加速度
-      acc_lim_theta: 1.8                  #最大角加速度
+      max_vel_x:    1.0                      #最大平移速度
+      max_vel_x_backwards: 1.0             #最大后退速度
+      max_vel_theta: 1.8                  #最大转向角速度
+      acc_lim_x: 1.8      # 0.1         #最大平移加速度
+      acc_lim_theta: 1.8                 #最大角加速度
+      footprint_model:
+        type: polygon
+        vertices: "[[-0.22 -0.19], [0.20, -0.19], [0.20, 0.19], [-0.22, 0.19]]"
       is_footprint_dynamic: False           #如果为真，在检查轨迹可行性之前更新足迹
       use_proportional_saturation: False    #如果为true，则按比例减少所有扭曲分量（线性x和y以及角度z）（如果任何扭曲分量超过其相应的界限），而不是单独饱和每个扭曲分量
       transform_tolerance: 0.5              #在TF树中查询转换时的容差（秒）
@@ -153,7 +168,7 @@ controller_server:
       #*******************************************************************************
       # Robot/Carlike 此部分参数仅适用于类似汽车的机器人（如差速驱动机器人）
       #*******************************************************************************
-      min_turning_radius: 0.7             #机器人的最小转弯半径。对于差速驱动机器人，此值为0
+      min_turning_radius: 0.0             #机器人的最小转弯半径。对于差速驱动机器人，此值为0
       wheelbase: 1.0                      #驱动轮轴与转向轮轴之间的距离。后轮驱动机器人此值可能为负数。
       cmd_angle_instead_rotvel: False     #是否用转向角代替控制指令消息中的旋转速度（需要结合轴距参数使用）
 
@@ -170,13 +185,13 @@ controller_server:
       #*******************************************************************************
       # Obstacles 障碍物
       #*******************************************************************************
-      min_obstacle_dist: 0.45    # 0.25                     #机器人与障碍物之间最小的期望间隔距离
-      inflation_dist: 0.5                         #障碍物周围的缓冲区，用于增加安全裕度。此缓冲区内具有非零的惩罚代价
+      min_obstacle_dist: 0.02    # 多边形已包含车体，额外间距 2 cm；需实车核验。
+      inflation_dist: 0.1                         #障碍物周围的缓冲区，用于增加安全裕度。此缓冲区内具有非零的惩罚代价
       dynamic_obstacle_inflation_dist: 0.5        #具有非零惩罚成本的动态障碍物预测位置周围的缓冲区（应大于min_obstacle_dist才能生效)
       include_dynamic_obstacles: True             #预测动态障碍物周围的缓冲区，用于增加安全裕度。此缓冲区内具有非零的惩罚代价
       include_costmap_obstacles: True             #是否直接考虑代价地图中的障碍物 (如果没有单独的聚类和检测功能，则需要此选项)
       legacy_obstacle_association: False          #是否严格遵循局部规划出来的路径。如果为真，则使用旧的关联策略 (为每个障碍物找到最近的 TEB 姿势)，否则使用新的关联策略 (为每个 TEB 姿势仅找到“相关”障碍物)
-      costmap_obstacles_behind_robot_dist: 1.5    #限制规划时考虑的占据局部代价地图障碍物 (指定距离，米)。该值仅对机器人后方的障碍物生效。
+      costmap_obstacles_behind_robot_dist: 2.5 #限制规划时考虑的占据局部代价地图障碍物 (指定距离，米)。该值仅对机器人后方的障碍物生效。
       obstacle_poses_affected: 15                 #为了减少计算量，障碍物位置会附加到轨迹上最近的姿态上，但也会考虑一定数量的相邻姿态。
 
       # costmap_converter_plugin: "costmap_converter::CostmapToPolygonsDBSMCCH"
@@ -187,7 +202,7 @@ controller_server:
       # Obstacle - Velocity ratio parameters 该组包含用于根据障碍物 proximity 动态调整机器人速度的设置。
       #*******************************************************************************
       obstacle_proximity_ratio_max_vel: 1.0     #由于接近静态障碍物而降低速度时用作上限的比率。
-      obstacle_proximity_lower_bound: 0.0       #需要降低速度的静态障碍物距离 (米)
+      obstacle_proximity_lower_bound:   1.     #需要降低速度的静态障碍物距离 (米)
       obstacle_proximity_upper_bound: 0.5       #应该保持较高速度的静态障碍物距离 (米)
 
       #*******************************************************************************
@@ -197,7 +212,7 @@ controller_server:
       no_outer_iterations: 4         #外循环每次迭代会自动调整轨迹大小，并使用指定的内部迭代次数调用内部优化器
       optimization_activate: True    #启用优化功能
       optimization_verbose: False    #打印详细的优化过程信息
-      penalty_epsilon: 0.15          #为惩罚函数添加微小的安全裕量，用于处理难以满足的硬性约束条件
+      penalty_epsilon: 0.01          #为惩罚函数添加微小的安全裕量，用于处理难以满足的硬性约束条件
 
       # 权重参数
       obstacle_cost_exponent: 4.0
@@ -257,16 +272,17 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 40.0
-      publish_frequency: 10.0
-      global_frame: map
+      update_frequency: 40.0            
+      publish_frequency: 10.0             #局部代价地图的发布频率，单位为Hz。
+      global_frame: map                   
       robot_base_frame: base_link
       use_sim_time: False
       rolling_window: true
       width: 5
       height: 5
       resolution: 0.02
-      robot_radius: 0.27
+      footprint: "[[-0.22 -0.19], [0.20, -0.19], [0.20, 0.19], [-0.22, 0.19]]"
+      footprint_padding: 0.0
       # 仅替换实时障碍输入，原控制器、速度、膨胀半径等保持不变。
       plugins: ["terrain_layer", "inflation_layer"]
       terrain_layer:
@@ -283,7 +299,7 @@ local_costmap:
           topic: /scan
           raytrace_max_range: 6.0
           obstacle_max_range: 6.0
-          obstacle_min_range: 0.78
+          obstacle_min_range: 0.10
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -291,8 +307,8 @@ local_costmap:
           data_type: "LaserScan"
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.5
-        inflation_radius: 0.43
+        cost_scaling_factor: 3.5        
+        inflation_radius: 0.30
       always_send_full_costmap: true
 
 global_costmap:
@@ -303,7 +319,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: False
-      robot_radius: 0.28
+      footprint: "[[-0.32, -0.29], [0.30, -0.29], [0.30, 0.29], [-0.32, 0.29]]"
+      footprint_padding: 0.02
       resolution: 0.02
       track_unknown_space: true
       # 彻底移除 stvl_layer（enabled:false 未生效，ground_segmentation 误检的 1.7w 障碍点仍污染 costmap 导致 planner 失败）
@@ -332,7 +349,7 @@ global_costmap:
         observation_sources:      livox_mark livox_clear
         livox_mark:
           data_type: PointCloud2
-          topic: /segmentation/obstacle
+          topic: /segmentation/obstacle   
           marking: true
           clearing: false
           obstacle_range: 3.0                                       # meters
@@ -346,10 +363,10 @@ global_costmap:
           clear_after_reading: true                                 # default false, clear the buffer after the layer gets readings from it
         livox_clear:
           enabled: true                                             # default true, can be toggled on/off with associated service call
-          data_type: PointCloud2
-          topic: /segmentation/obstacle
-          marking: false
-          clearing: true
+          data_type: PointCloud2         
+          topic: /segmentation/obstacle           
+          marking: false                    
+          clearing: true                        
           max_z: 8.0                                                # default 10, meters
           min_z: 1.0                                                # default 0, meters
           vertical_fov_angle: 1.029                                 # 垂直视场角，单位为弧度，For 3D lidars it's the symmetric FOV about the planar axis.
@@ -362,9 +379,10 @@ global_costmap:
         footprint_clearing_enabled: True
         map_subscribe_transient_local: True
       inflation_layer:
+
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 7.0
-        inflation_radius: 0.43
+        inflation_radius: 0.35
       always_send_full_costmap: True
 
 map_saver:
@@ -412,14 +430,14 @@ map_server:
 
 velocity_smoother:
   ros__parameters:
-    smoothing_frequency: 20.0
+    smoothing_frequency: 40.0
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [3.0, 3.0, 3.0]
-    min_velocity: [-3.0, -3.0, -3.0]
+    max_velocity: [1.0, 1.0, 1.0]
+    min_velocity: [-1.0, -1.0, -1.0]
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
-    max_accel: [2.0, 2.0, 6.0]
-    max_decel: [-2.0, -2.0, -6.0]
+    max_accel: [1.8, 1.8, 3.0]
+    max_decel: [-1.8, -1.8, -6.0]
     odom_topic: "Odometry"
     odom_duration: 0.1

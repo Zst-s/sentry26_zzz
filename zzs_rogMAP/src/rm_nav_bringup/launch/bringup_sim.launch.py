@@ -97,7 +97,7 @@ def generate_launch_description():
 
     declare_LIO_cmd = DeclareLaunchArgument(
         'lio',
-        default_value='fast_lio',
+        default_value='fastlio',
         description='Choose lio alogrithm: fastlio or pointlio')
 
     # Specify the actions
@@ -156,22 +156,6 @@ def generate_launch_description():
     )
 
     bringup_LIO_group = GroupAction([
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            arguments=[
-                # Useless arguments, provided by LIO in publish_odometry() function
-                # '--x', '0.0',
-                # '--y', '0.0',
-                # '--z', '0.0',
-                # '--roll', '0.0',
-                # '--pitch', '0.0',
-                # '--yaw', '0.0',
-                '--frame-id', 'odom',
-                '--child-frame-id', 'odom'
-            ],
-        ),
-
         GroupAction(
             condition = LaunchConfigurationEquals('lio', 'fastlio'),
             actions=[
@@ -180,7 +164,7 @@ def generate_launch_description():
                 executable='fastlio_mapping',
                 parameters=[
                     fastlio_mid360_params,
-                    {use_sim_time: use_sim_time}
+                    {'use_sim_time': use_sim_time}
                 ],
                 output='screen'
             ),
@@ -304,6 +288,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'map': nav2_map_dir,
             'params_file': nav2_params_file_dir,
+            'cmd_vel_output': '/cmd_vel_chassis',
             'nav_rviz': use_nav_rviz}.items()
     )
 

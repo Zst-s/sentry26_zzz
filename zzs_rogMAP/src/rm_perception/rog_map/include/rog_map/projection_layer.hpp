@@ -57,8 +57,6 @@ struct ProjectionLayerConfig
   bool unknown_as_occupied{false};
   int min_observed_voxels{2};
   double surface_height_delta_max{0.10};
-  bool elevated_surface_as_obstacle{false};
-  double elevated_surface_min_z_abs{0.0};
   double wall_height_delta_min{0.20};
   double wall_occupancy_ratio_min{0.80};
   double tunnel_height_delta_min{0.24};

@@ -124,6 +124,8 @@ if(BUILD_TESTING)
         find_package(ament_cmake_gtest REQUIRED)
         ament_add_gtest(test_projection_layer test/test_projection_layer.cpp)
         target_link_libraries(test_projection_layer ${library_name})
+        ament_add_gtest(test_observation_tracking test/test_observation_tracking.cpp)
+        target_link_libraries(test_observation_tracking ${library_name})
 endif()
 
 ament_package()
