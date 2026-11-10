@@ -1,0 +1,10 @@
+# Path belongs to the current navigation BT blackboard, not a cached /plan topic.
+nav_msgs/Path path
+float64 distance
+float64 speed
+float64 lookahead
+builtin_interfaces/Duration time_allowance
+---
+builtin_interfaces/Duration total_elapsed_time
+---
+float64 distance_traveled

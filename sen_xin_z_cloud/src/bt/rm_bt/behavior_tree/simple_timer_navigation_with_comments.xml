@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4"
+      main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <ReactiveSequence>
+      <Timer elapsed_time="{elapsed_time}"/>
+      <ReactiveFallback>
+        <Sequence>
+          <CheckElapsedTime elapsed_time="{elapsed_time}"
+                            target_time="60"
+                            operator="greater_than"/>
+          <Nav2Pose goal="0.3457;2.47;0;0;0;0;1"/>
+        </Sequence>
+        <Sequence>
+          <CheckElapsedTime elapsed_time="{elapsed_time}"
+                            target_time="50"
+                            operator="greater_than"/>
+          <Nav2Pose goal="2.2;2.766;0;0;0;0;1"/>
+        </Sequence>
+        <Sequence>
+          <PreparePassage if_guodong="0"/>
+          <Delay delay_msec="100">
+            <Nav2Pose goal="0.0;1.0;0;0;0;0;1"/>
+          </Delay>
+        </Sequence>
+        <PreparePassage if_guodong="1"/>
+      </ReactiveFallback>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- Description of Node Models (used by Groot) -->
+  <TreeNodesModel>
+    <Condition ID="CheckElapsedTime"
+               editable="true">
+      <input_port name="elapsed_time"
+                  default="0">从启动开始经过的时间（秒）</input_port>
+      <input_port name="target_time"
+                  default="30">目标时间（秒）</input_port>
+      <input_port name="operator"
+                  default="greater_than">比较运算符: less_than, greater_than, equal</input_port>
+    </Condition>
+    <Action ID="Nav2Pose"
+            editable="true">
+      <input_port name="goal"
+                  default="0;0;0;0;0;0;1">目标位置(x,y,z,qx,qy,qz,qw)</input_port>
+    </Action>
+    <Action ID="PreparePassage"
+            editable="true">
+      <input_port name="if_guodong">0=收头并保持过洞，1=抬头退出过洞</input_port>
+    </Action>
+    <Action ID="Timer"
+            editable="true">
+      <output_port name="elapsed_time">从启动到现在经过的时间（秒）</output_port>
+    </Action>
+  </TreeNodesModel>
+
+</root>

@@ -1,0 +1,718 @@
+#include "rm_serial_protocol/nav_rx.hpp"
+#include <algorithm>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <map>
+#include "rclcpp/rclcpp.hpp"
+#include "serial/serial.h"
+#include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/float32.hpp"
+#include "std_msgs/msg/u_int8.hpp"
+#include "std_msgs/msg/u_int16.hpp"
+#include "std_msgs/msg/int32.hpp"
+#include "std_msgs/msg/int16.hpp"
+#include "std_msgs/msg/empty.hpp"
+#include "geometry_msgs/msg/twist.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "tf2_ros/transform_broadcaster.h"
+#include <iostream>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include "base_interfaces_demo/msg/robot.hpp"
+#include "base_interfaces_demo/msg/control.hpp"
+#include "rm_decision_interfaces/msg/both_camp_hp.hpp"
+#include "rm_decision_interfaces/msg/enemy_detected.hpp"
+#include "rm_decision_interfaces/msg/robot_status.hpp"
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <vector>
+#include <cmath>
+// #include "rcl_interfaces/msg/log.hpp"
+
+using namespace std;
+using std::placeholders::_1;
+
+#define sBUFFERSIZE rm_serial_protocol::kFrameBytes                   // send buffer size 串口发送缓存长度
+#define rBUFFERSIZE 30                   // receive buffer size 串口接收缓存长度
+uint8_t s_buffer[sBUFFERSIZE];           // 发送缓存
+unsigned char r_buffer[rBUFFERSIZE];     // 接收缓存
+unsigned char after_buffer[rBUFFERSIZE]; // 处理后的数组
+
+// 联合体,用于浮点数与16进制的快速转换
+typedef union
+{
+    unsigned char cvalue[4];
+    float fvalue;
+} float_union;
+
+// 创建一个serial类
+serial::Serial ser;
+
+// 保护串口操作的互斥量，防止并发读写导致异常未捕获
+static std::mutex ser_mutex;
+
+// 全局串口状态，供主循环与异常处理共享
+static std::atomic<bool> serial_open(false);
+
+// 流式接收缓存，用于粘包/拆包
+// (moved recv buffer into the SerialChassis instance for thread-safety)
+
+int arrival;
+// 姿态：ATTACK=1 / DEFENSE=2 / MOVE=3，无 0 值。导航模式下 rm_bt 不运行、无 /target_stance 发布者，
+// 若保持 0 底盘收不到合法姿态而拒动。默认 MOVE(3) 保证导航模式可直接行驶。
+uint8_t target_stance = 3;
+
+// 导航就绪标志：底盘需 nav_ready=1 且 target_stance 合法才接收速度。导航模式下底盘只响应
+// nav2 的 /cmd_vel（nav2 未启动时本就无速度），rosout_node 的日志检测又不可靠，故默认置 1。
+int nav_ready = 1;
+int super_ele = 0;
+uint8_t if_guodong = 1; // Default raised; 0=fold, 1=raise.
+int intensify = 0;
+
+class SerialChassis : public rclcpp::Node
+{
+public:
+    SerialChassis() : Node("serial_chassis_node")
+    {
+        try {
+            tx_status_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+                "/passage/serial_tx_status", rclcpp::SensorDataQoS().keep_last(5));
+        } catch (const std::exception &error) {
+            RCLCPP_WARN(get_logger(), "Serial observation unavailable: %s", error.what());
+        }
+        serial_port_ = declare_parameter<std::string>("serial_port", "/dev/ttyACM0");
+        print_every_ = declare_parameter<int>("serial_rx_log_every", 5);
+        if (print_every_ < 1) throw std::invalid_argument("serial_rx_log_every must be positive");
+        RCLCPP_INFO(get_logger(), "USB TX protocol: A5 + total length + packed payload; bytes=%zu; if_guodong offset=17 (0=fold,1=raise); port=%s", rm_serial_protocol::kFrameBytes, serial_port_.c_str());
+        command_timeout_ = declare_parameter<double>("command_timeout", 0.25);
+        if (!std::isfinite(command_timeout_) || command_timeout_ <= 0 || command_timeout_ > 1.0)
+            throw std::invalid_argument("command_timeout must be in (0, 1] seconds");
+        require_localization_health_ = declare_parameter<bool>("require_localization_health", false);
+        if (require_localization_health_) {
+            health_sub_ = create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+                "/pointlio/status", 1, [this](diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr msg) {
+                    try {
+                        if (msg->status.size()!=1) throw std::invalid_argument("status count");
+                        const auto &st=msg->status.front();
+                        std::map<std::string,std::string> values;
+                        for (const auto &kv:st.values)
+                            if (!values.emplace(kv.key,kv.value).second) throw std::invalid_argument("duplicate field");
+                        if (st.name!="pointlio/localization" || st.hardware_id.empty())
+                            throw std::invalid_argument("status identity");
+                        size_t used=0;
+                        const auto generation=std::stoull(values.at("generation"),&used);
+                        if (used!=values.at("generation").size() || generation<health_generation_)
+                            throw std::invalid_argument("generation");
+                        const auto seq=std::stoull(values.at("sequence"),&used);
+                        if (used!=values.at("sequence").size() || seq==0) throw std::invalid_argument("sequence");
+                        const double stamp=std::stod(values.at("last_valid_stamp"),&used);
+                        if (used!=values.at("last_valid_stamp").size() || !std::isfinite(stamp) || stamp<0)
+                            throw std::invalid_argument("stamp");
+                        if (health_session_.empty()) health_session_=st.hardware_id;
+                        health_session_changed_ = health_session_changed_ || st.hardware_id!=health_session_;
+                        if (health_session_changed_) {health_tracking_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();return;}
+                        if (seq<=health_sequence_) return;
+                        if (generation!=health_generation_) {motion_ready_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();}
+                        health_generation_=generation;
+                        health_sequence_=seq;health_at_=std::chrono::steady_clock::now();
+                        const double published=msg->header.stamp.sec+msg->header.stamp.nanosec*1e-9;
+                        health_tracking_=st.level==0 && values.at("state")=="TRACKING" && stamp>0 &&
+                            published-stamp>=-.1 && published-stamp<=odometry_timeout_;
+                        if (!health_tracking_) {cmd_vel_buffer=geometry_msgs::msg::Twist();motion_ready_=false;}
+                    } catch (const std::exception &) {health_tracking_=false;motion_ready_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();}
+                });
+            motion_ready_sub_ = create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
+                "/passage/localization_motion_ready", 1,
+                [this](diagnostic_msgs::msg::DiagnosticArray::ConstSharedPtr msg) {
+                    try {
+                        if (msg->status.size()!=1) throw std::invalid_argument("navigation status count");
+                        const auto &st=msg->status.front();std::map<std::string,std::string> values;
+                        for (const auto &kv:st.values)
+                            if (!values.emplace(kv.key,kv.value).second) throw std::invalid_argument("duplicate field");
+                        size_t used=0;const auto generation=std::stoull(values.at("generation"),&used);
+                        if (used!=values.at("generation").size()) throw std::invalid_argument("generation");
+                        const auto seq=std::stoull(values.at("sequence"),&used);
+                        if (used!=values.at("sequence").size() || !seq) throw std::invalid_argument("sequence");
+                        if (st.name!="pointlio/navigation" || st.hardware_id!=health_session_ ||
+                            generation!=health_generation_) {motion_ready_=false;return;}
+                        if (seq<=motion_sequence_) return;
+                        motion_sequence_=seq;
+                        motion_ready_=st.level==0 && values.at("state")=="READY";
+                        motion_ready_at_=std::chrono::steady_clock::now();
+                        if (!motion_ready_ || !previous_motion_ready_) cmd_vel_buffer=geometry_msgs::msg::Twist();
+                        previous_motion_ready_=motion_ready_;
+                    } catch (const std::exception &) {motion_ready_=false;cmd_vel_buffer=geometry_msgs::msg::Twist();}
+                });
+        }
+        require_odometry_ = declare_parameter<bool>("require_odometry", false);
+        odometry_timeout_ = declare_parameter<double>("odometry_timeout", .25);
+        if (!std::isfinite(odometry_timeout_) || odometry_timeout_ <= 0. || odometry_timeout_ > 1.)
+            throw std::invalid_argument("odometry_timeout must be in (0, 1] seconds");
+        if (require_odometry_) {
+            odometry_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+                "/Odometry", rclcpp::SensorDataQoS().keep_last(1),
+                [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+                    const auto &p = msg->pose.pose.position;
+                    const auto &q = msg->pose.pose.orientation;
+                    if (msg->header.stamp.sec < 0 || msg->header.stamp.nanosec >= 1000000000U) return;
+                    const int64_t stamp = int64_t(msg->header.stamp.sec)*1000000000LL + msg->header.stamp.nanosec;
+                    if (msg->header.frame_id != "odom" || !std::isfinite(p.x) ||
+                        !std::isfinite(p.y) || !std::isfinite(p.z) ||
+                        !std::isfinite(q.x) || !std::isfinite(q.y) ||
+                        !std::isfinite(q.z) || !std::isfinite(q.w) ||
+                        q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w < 1e-6 ||
+                        stamp <= last_odometry_stamp_) return;
+                    last_odometry_stamp_ = stamp;
+                    last_odometry_ = std::chrono::steady_clock::now();
+                });
+        }
+        target_stance_sub = this->create_subscription<std_msgs::msg::UInt8>("/target_stance", 10, std::bind(&SerialChassis::target_stance_callback, this, _1));
+        super_ele_sub = this->create_subscription<std_msgs::msg::UInt8>("/super_ele", 10, std::bind(&SerialChassis::super_ele_callback, this, _1));
+        cmd_vel_sub = this->create_subscription<geometry_msgs::msg::Twist>("/cmd_vel", 1, std::bind(&SerialChassis::cmd_vel_callback, this, _1));
+        if_guodong_sub = this->create_subscription<std_msgs::msg::UInt8>("/if_guodong", rclcpp::QoS(1).reliable().transient_local(), std::bind(&SerialChassis::if_guodong_callback, this, _1));
+        intensify_sub = this->create_subscription<std_msgs::msg::UInt8>("/intensify", 10, std::bind(&SerialChassis::intensify_callback, this, _1));
+
+        RobotStatus_pub = this->create_publisher<rm_decision_interfaces::msg::RobotStatus>("/robot_status", 10);
+        enemy_detected_pub = this->create_publisher<std_msgs::msg::UInt8>("/enemy_detected", 10);
+        game_status_pub = this->create_publisher<std_msgs::msg::UInt8>("/game_status", 10);
+        tree_num_pub = this->create_publisher<std_msgs::msg::UInt8>("/tree_num", 10);
+        outpost_if_pub = this->create_publisher<std_msgs::msg::UInt8>("/outpost_if", 10);
+        fort_if_pub = this->create_publisher<std_msgs::msg::UInt8>("/fort_if", 10);
+        midhigh_if_pub = this->create_publisher<std_msgs::msg::UInt8>("/midhigh_if", 10);
+        remain_time_pub = this->create_publisher<std_msgs::msg::UInt16>("/remain_time", 10);
+
+        nav_ready_sub = this->create_subscription<std_msgs::msg::UInt8>("/nav_ready", 10, std::bind(&SerialChassis::nav_ready_callback, this, _1));
+
+
+        mid_if_pub = this->create_publisher<std_msgs::msg::UInt8>("/mid_if", 10);        //RMUL
+        both_camp_hp_pub = this->create_publisher<rm_decision_interfaces::msg::BothCampHp>("/both_camp_hp", 10);
+
+    // 创建定时器，周期为10毫秒（原来为1ms，过于频繁会导致大量发送日志）
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(10), std::bind(&SerialChassis::timer_callback, this));
+
+        // 保护代码
+        try
+        {
+            ser.setPort(serial_port_);
+            ser.setBaudrate(115200);     // 设置串口通信的波特率
+            serial::Timeout to = serial::Timeout::simpleTimeout(10);
+            ser.setTimeout(to);
+            ser.open(); // 打开串口
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_ERROR(this->get_logger(), "无法打开端口！！！ 将在运行时重试打开串口");
+            // Do not shutdown here; allow main loop to attempt reconnects
+        }
+
+        // 判断是否初始化成功（如果未打开，不在此处退出，主循环会尝试重连）
+        if (ser.isOpen())
+        {
+            RCLCPP_INFO(this->get_logger(), "串行端口已初始化");
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "串口未打开，构造时将不退出，主循环会重试打开串口");
+        }
+
+        // start background reader thread
+        running_.store(true);
+        read_thread_ = std::thread(&SerialChassis::read_loop, this);
+    }
+
+    ~SerialChassis()
+    {
+        // stop background thread and clean up
+        running_.store(false);
+        if (read_thread_.joinable()) {
+            read_thread_.join();
+        }
+        // Best effort only: MCU must independently stop when this process dies.
+        data_pack(geometry_msgs::msg::Twist());
+        try {
+            std::lock_guard<std::mutex> lk(ser_mutex);
+            if (ser.isOpen()) ser.close();
+        } catch (...) {}
+    }
+
+    // background reader thread
+    void read_loop()
+    {
+        using namespace std::chrono_literals;
+        while (rclcpp::ok() && running_.load()) {
+            // ensure serial is open
+            bool connected;
+            { std::lock_guard<std::mutex> lk(ser_mutex); connected = ser.isOpen(); }
+            if (!connected) {
+                discard_command_.store(true);
+                try {
+                    std::lock_guard<std::mutex> lk(ser_mutex);
+                    ser.setPort(serial_port_);
+                    ser.setBaudrate(115200);
+                    serial::Timeout to = serial::Timeout::simpleTimeout(10);
+                    ser.setTimeout(to);
+                    ser.open();
+                    if (ser.isOpen()) {
+                        RCLCPP_INFO(this->get_logger(), "串口已打开（read_loop 恢复连接）");
+                    }
+                } catch (const std::exception &e) {
+                    RCLCPP_ERROR(this->get_logger(), "尝试在 read_loop 中打开串口失败: %s", e.what());
+                    std::this_thread::sleep_for(200ms);
+                    continue;
+                }
+            }
+
+            // Never hold the serial mutex waiting for a byte: that blocks stop commands.
+            try {
+                std::vector<unsigned char> temp(256);
+                size_t nread = 0;
+                {
+                    std::lock_guard<std::mutex> lk(ser_mutex);
+                    const auto available = ser.available();
+                    if (available > 0)
+                        nread = ser.read(temp.data(), std::min(available, size_t(256)));
+                }
+                if (nread > 0) {
+                    rx_bytes_total_.fetch_add(nread, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lk(recv_mutex_);
+                    recv_buffer_.insert(recv_buffer_.end(), temp.begin(), temp.begin() + nread);
+                }
+            } catch (const std::exception &e) {
+                RCLCPP_ERROR(this->get_logger(), "串口读取异常 (read_loop): %s", e.what());
+                try { std::lock_guard<std::mutex> lk(ser_mutex); ser.close(); } catch (...) {}
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
+            }
+
+            // process frames from recv_buffer_
+            {
+                std::lock_guard<std::mutex> lk(recv_mutex_);
+                // look for full frames
+                while (recv_buffer_.size() >= rBUFFERSIZE) {
+                    auto it = std::find(recv_buffer_.begin(), recv_buffer_.end(), 0xA5);
+                    if (it == recv_buffer_.end()) {
+                        // no header, drop everything
+                        recv_buffer_.clear();
+                        break;
+                    }
+                    size_t idx = std::distance(recv_buffer_.begin(), it);
+                    if (recv_buffer_.size() - idx < rBUFFERSIZE) {
+                        // incomplete frame
+                        break;
+                    }
+                    unsigned char frame[rBUFFERSIZE];
+                    for (size_t i = 0; i < rBUFFERSIZE; ++i) frame[i] = recv_buffer_[idx + i];
+                    // erase consumed bytes
+                    recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + idx + rBUFFERSIZE);
+                    // process extracted frame (publish etc.)
+                    process_frame(frame);
+                }
+            }
+
+            std::this_thread::sleep_for(2ms);
+        }
+    }
+
+    void process_frame(const unsigned char *new_r_buffer)
+    {
+        // 控制打印频率：只有每 print_every_ 帧打印一次所有字节，避免日志量过大
+        int count = frame_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
+        bool printed_group = false;
+        // 先计算血量，以便在分组打印中先输出血量行
+        uint16_t current_hp = (uint16_t)new_r_buffer[3] << 8 | (uint16_t)new_r_buffer[4];
+        if (count % print_every_ == 0) {
+            printed_group = true;
+            RCLCPP_INFO(this->get_logger(), "-----------------------------------------------");
+            // 先打印血量行
+            RCLCPP_INFO(this->get_logger(), "血量发送为: %d", current_hp);
+            // 再打印每字节内容
+            for (int i = 0; i < rBUFFERSIZE; ++i) {
+                RCLCPP_INFO(this->get_logger(), "r%d发送为: %d", i, new_r_buffer[i]);
+            }
+        }
+
+        // Mirror the processing logic from main() for a single extracted frame
+        uint16_t own_sentry_hp = (uint16_t)new_r_buffer[3] << 8 | (uint16_t)new_r_buffer[4];
+        uint8_t current_stance = (uint8_t)new_r_buffer[7];
+        rm_decision_interfaces::msg::BothCampHp both_camp_hp_msg;
+        both_camp_hp_msg.own_sentry_hp = own_sentry_hp;
+        both_camp_hp_msg.current_stance = current_stance;
+        both_camp_hp_pub->publish(both_camp_hp_msg);
+
+    // 血量信息已在上面计算（用于分组打印）
+        rm_decision_interfaces::msg::RobotStatus robotstatus_msg;
+        robotstatus_msg.current_hp = current_hp;
+        robotstatus_msg.outpost_hp = (uint16_t)new_r_buffer[1] << 8 | (uint16_t)new_r_buffer[2];
+        robotstatus_msg.en_outpost_hp = (uint16_t)new_r_buffer[5] << 8 | (uint16_t)new_r_buffer[6];
+        robotstatus_msg.current_stance = (uint8_t)new_r_buffer[7];
+        robotstatus_msg.bullets_fired = (uint16_t)new_r_buffer[12] << 8 | (uint16_t)new_r_buffer[13];
+        robotstatus_msg.remain_gold = (uint16_t)new_r_buffer[14] << 8 | (uint16_t)new_r_buffer[15];
+        robotstatus_msg.fort_fired = (uint16_t)new_r_buffer[16] << 8 | (uint16_t)new_r_buffer[17];
+        robotstatus_msg.resur_gold = (uint16_t)new_r_buffer[18] << 8 | (uint16_t)new_r_buffer[19];
+        robotstatus_msg.ifoutpost = (uint8_t)new_r_buffer[25];    //是否识别敌方前哨站
+        robotstatus_msg.in_defense_re_time = (uint8_t)new_r_buffer[27];     //强化防御剩余时间
+        RobotStatus_pub->publish(robotstatus_msg);
+
+        std_msgs::msg::UInt8 fort_if_msg;
+        fort_if_msg.data = (uint8_t)new_r_buffer[22];
+        fort_if_pub->publish(fort_if_msg);
+
+        // std_msgs::msg::UInt8 outpost_if_msg;
+        // outpost_if_msg.data = (uint8_t)new_r_buffer[23];
+        // outpost_if_pub->publish(outpost_if_msg);
+
+        // std_msgs::msg::UInt8 midhigh_if_msg;
+        // midhigh_if_msg.data = (uint8_t)new_r_buffer[24];
+        // midhigh_if_pub->publish(midhigh_if_msg);
+
+        std_msgs::msg::UInt16 remain_time_msg;
+        remain_time_msg.data = (uint16_t)new_r_buffer[20] << 8 | (uint16_t)new_r_buffer[21];
+        remain_time_pub->publish(remain_time_msg);
+
+        uint8_t game_status = (uint8_t)new_r_buffer[9];
+        std_msgs::msg::UInt8 game_status_msg;
+        game_status_msg.data = game_status;
+        game_status_pub->publish(game_status_msg);
+
+        uint8_t enemy_detected_flag = (uint8_t)new_r_buffer[8];
+        std_msgs::msg::UInt8 enemy_detected_msg;
+        enemy_detected_msg.data = enemy_detected_flag;
+        enemy_detected_pub->publish(enemy_detected_msg);
+
+        uint8_t tree_num = (uint8_t)new_r_buffer[10];
+        std_msgs::msg::UInt8 tree_num_msg;
+        tree_num_msg.data = tree_num;
+        tree_num_pub->publish(tree_num_msg);
+
+        uint8_t mid_if = (uint8_t)new_r_buffer[11];
+        std_msgs::msg::UInt8 mid_if_msg;
+        mid_if_msg.data = mid_if;
+        mid_if_pub->publish(mid_if_msg);
+
+        // 非分组帧不打印血量，避免日志噪声；血量将在分组打印时一起输出
+
+        if (game_status == 5) {
+            std::system("shutdown now");
+        }
+    }
+
+
+    void publish_tx_observation(const geometry_msgs::msg::Twist &command,
+        int64_t written, const std::string &result, const std::string &blocking_reason) noexcept
+    {
+        if (!tx_status_pub_ || !rclcpp::ok()) return;
+        try {
+            diagnostic_msgs::msg::DiagnosticArray message;
+            message.header.stamp = now();
+            message.header.frame_id = "base_link";
+            diagnostic_msgs::msg::DiagnosticStatus status;
+            status.name = "decision/serial_tx";
+            status.hardware_id = serial_port_;
+            status.level = result == "write_complete" ? 0 : 2;
+            status.message = result;
+            const auto field = [&](const std::string &key, const std::string &value) {
+                diagnostic_msgs::msg::KeyValue entry;
+                entry.key = key; entry.value = value; status.values.push_back(entry);
+            };
+            field("sequence", std::to_string(++tx_observation_sequence_));
+            field("requested_bytes", std::to_string(sBUFFERSIZE));
+            field("written_bytes", std::to_string(written)); // -1: exception, byte count unknown.
+            field("blocking_reason", blocking_reason);
+            field("frame_vx", std::to_string(static_cast<float>(command.linear.x)));
+            field("frame_vy", std::to_string(static_cast<float>(command.linear.y)));
+            field("frame_wz", std::to_string(static_cast<float>(command.angular.z)));
+            field("target_stance", std::to_string(target_stance));
+            field("nav_ready", std::to_string(nav_ready));
+            field("if_guodong", std::to_string(if_guodong));
+            field("if_guodong_offset", "17");
+            field("frame_header", "0xA5");
+            field("rx_bytes_total", std::to_string(rx_bytes_total_.load(std::memory_order_relaxed)));
+            message.status.push_back(status);
+            tx_status_pub_->publish(message);
+        } catch (...) {
+            // Observation must never change the existing serial/control path.
+        }
+    }
+
+    void data_pack(const geometry_msgs::msg::Twist &cmd_vel,
+                   const std::string &blocking_reason = "none")
+    {
+        rm_serial_protocol::NavRxData packet;
+        packet.Navigation_x = static_cast<float>(cmd_vel.linear.x);
+        packet.Navigation_y = static_cast<float>(cmd_vel.linear.y);
+        packet.Navigation_z = static_cast<float>(cmd_vel.angular.z);
+        packet.target_stance = target_stance;
+        packet.nav_ready = static_cast<uint8_t>(nav_ready);
+        packet.super_cap_flag = static_cast<uint8_t>(super_ele);
+        packet.if_guodong = if_guodong; // wire offset 17: 0=fold, 1=raise
+        packet.if_stronger = static_cast<uint8_t>(intensify);
+        // 0xA5 + length(148) + packed struct(146); unused tail is zero.
+        const auto frame = rm_serial_protocol::encode(packet);
+        std::copy(frame.begin(), frame.end(), s_buffer);
+
+        int64_t written = 0;
+        std::string result = "port_closed";
+        {
+            // Release the serial mutex before publishing observation data.
+            std::lock_guard<std::mutex> lk(ser_mutex);
+            if (!ser.isOpen()) {
+                discard_command_.store(true);
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *get_clock(), 2000, "串口未打开，跳过发送");
+            } else {
+                try {
+                    written = static_cast<int64_t>(ser.write(s_buffer, sBUFFERSIZE));
+                    result = written == sBUFFERSIZE ? "write_complete" : "write_incomplete";
+                    RCLCPP_DEBUG(this->get_logger(), "发送成功");
+                } catch (const std::exception &e) {
+                    written = -1;
+                    result = "write_error";
+                    discard_command_.store(true);
+                    RCLCPP_ERROR(this->get_logger(), "串口写入异常: %s; requested=%zu; rx_bytes_total=%llu", e.what(), rm_serial_protocol::kFrameBytes, static_cast<unsigned long long>(rx_bytes_total_.load(std::memory_order_relaxed)));
+                    try { ser.close(); } catch (...) {}
+                }
+            }
+        }
+        publish_tx_observation(cmd_vel, written, result, blocking_reason);
+    }
+
+
+    // target_stance话题的回调函数
+    void target_stance_callback(const std_msgs::msg::UInt8::SharedPtr msg)
+    {
+        target_stance = msg->data;
+        RCLCPP_INFO(this->get_logger(), "Received target_stance data: %d", target_stance);
+        new_target_stance_received = true;
+    }
+
+    // super_ele话题的回调函数
+    void super_ele_callback(const std_msgs::msg::UInt8::SharedPtr msg)
+    {
+        super_ele = msg->data;
+    }
+
+    void if_guodong_callback(const std_msgs::msg::UInt8::SharedPtr msg)
+    {
+        if (msg->data > 1) {
+            RCLCPP_WARN(this->get_logger(), "Ignoring invalid if_guodong: %u", msg->data);
+            return;
+        }
+        if_guodong = msg->data;
+    }
+
+    void intensify_callback(const std_msgs::msg::UInt8::SharedPtr msg)
+    {
+        intensify = msg->data;
+    }
+
+    // nav_ready话题的回调函数，监控导航就绪状态
+    void nav_ready_callback(const std_msgs::msg::UInt8::SharedPtr msg)
+    {
+        nav_ready = 0;
+        nav_ready = msg->data;
+        nav_ready_received = true;
+    }
+
+
+    // 订阅cmd_vel话题的回调函数,用于显示速度以及角速度
+    void cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr cmd_vel)
+    {
+        const auto &v = *cmd_vel;
+        const bool valid = std::isfinite(v.linear.x) && std::isfinite(v.linear.y) &&
+            std::isfinite(v.angular.z) && v.linear.z == 0 && v.angular.x == 0 && v.angular.y == 0;
+        last_command_valid_ = valid;
+        cmd_vel_buffer = valid && localization_ready() ? v : geometry_msgs::msg::Twist();
+        last_command_ = std::chrono::steady_clock::now();
+        new_cmd_vel_received = true;
+    }
+
+    bool localization_ready() const {
+        if (!require_localization_health_) return true;
+        const auto now=std::chrono::steady_clock::now();
+        return health_tracking_ && !health_session_changed_ && motion_ready_ &&
+            std::chrono::duration<double>(now-health_at_).count()<=odometry_timeout_ &&
+            std::chrono::duration<double>(now-motion_ready_at_).count()<=odometry_timeout_;
+    }
+
+    // 定时器回调函数
+    void timer_callback()
+    {
+        const double age = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - last_command_).count();
+        const bool odometry_missing = require_odometry_ && std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - last_odometry_).count() > odometry_timeout_;
+        std::string blocking_reason = "none";
+        if (discard_command_.exchange(false)) blocking_reason = "serial_discard";
+        else if (age > command_timeout_) blocking_reason = "command_timeout";
+        else if (nav_ready == 0) blocking_reason = "nav_ready_zero";
+        else if (odometry_missing) blocking_reason = "odometry_timeout";
+        else if (!localization_ready()) blocking_reason = "localization_not_ready";
+        if (blocking_reason != "none")
+            cmd_vel_buffer = geometry_msgs::msg::Twist();
+        else if (!last_command_valid_)
+            blocking_reason = "invalid_command"; // The input callback already zeroed the buffer.
+        data_pack(cmd_vel_buffer, blocking_reason);
+        new_cmd_vel_received = false;
+        new_target_stance_received = false;
+        nav_ready_received = false;
+    }
+
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr target_stance_sub;
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr super_ele_sub;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub;
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr if_guodong_sub;
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr intensify_sub;
+
+    rclcpp::Publisher<rm_decision_interfaces::msg::RobotStatus>::SharedPtr RobotStatus_pub;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr enemy_detected_pub;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr game_status_pub;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr tree_num_pub;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr outpost_if_pub;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr fort_if_pub;
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr midhigh_if_pub;
+    rclcpp::Publisher<std_msgs::msg::UInt16>::SharedPtr remain_time_pub;
+
+    rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr mid_if_pub;           //RMUL
+    rclcpp::Publisher<rm_decision_interfaces::msg::BothCampHp>::SharedPtr both_camp_hp_pub;
+
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr tx_status_pub_;
+    uint64_t tx_observation_sequence_ = 0;
+    bool last_command_valid_ = false;
+    rclcpp::TimerBase::SharedPtr timer_;
+    geometry_msgs::msg::Twist cmd_vel_buffer;
+    std::string serial_port_;
+    double command_timeout_ = 0.25;
+    bool require_localization_health_=false,health_tracking_=false,motion_ready_=false;
+    bool previous_motion_ready_=false,health_session_changed_=false;
+    std::string health_session_;
+    uint64_t health_sequence_=0,health_generation_=0,motion_sequence_=0;
+    std::chrono::steady_clock::time_point health_at_{},motion_ready_at_{};
+    rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr health_sub_;
+    rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr motion_ready_sub_;
+    bool require_odometry_ = false;
+    double odometry_timeout_ = .25;
+    int64_t last_odometry_stamp_ = 0;
+    std::chrono::steady_clock::time_point last_odometry_{};
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
+    std::chrono::steady_clock::time_point last_command_{};
+    std::atomic<bool> discard_command_{false};
+    bool new_cmd_vel_received = false;
+    bool new_target_stance_received = false;
+
+    rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr nav_ready_sub;       // 订阅 /rosout 监控终端输出
+    bool nav_ready_received = true;
+    // recv buffer and thread for reading
+    std::vector<unsigned char> recv_buffer_;
+    std::mutex recv_mutex_;
+    std::thread read_thread_;
+    std::atomic<bool> running_{false};
+    // 控制打印频率，避免过多日志
+    std::atomic<int> frame_counter_{0};
+    std::atomic<uint64_t> rx_bytes_total_{0};
+    int print_every_ = 5; // 每5帧打印一次（可调整）
+
+};
+
+// 接收数据分析与校验
+/*bool data_analysis(unsigned char *buffer)
+{
+    // 定义标志位 求和
+    bool flag = true;
+    int temp;
+    int l = 0; // 强制拉回位
+    // unsigned char csum;
+    if ((buffer[0] == 0xA5))
+    {
+        flag = true; // 校验通过
+    }
+    else
+    {
+        // 去去年的土方法
+        if (buffer[0] != 0xA5)
+        {
+            for (int b = 0; b < rBUFFERSIZE; b++) // 1
+            {
+                buffer[b] = buffer[b + 1];
+            }
+            if (buffer[0] != 0xA5)
+            {
+                for (int b = 0; b < rBUFFERSIZE; b++) // 2
+                {
+                    buffer[b] = buffer[b + 1];
+                }
+                if (buffer[0] != 0xA5)
+                {
+                    for (int b = 0; b < rBUFFERSIZE; b++) // 3
+                    {
+                        buffer[b] = buffer[b + 1];
+                    }
+                    if (buffer[0] != 0xA5)
+                    {
+                        for (int b = 0; b < rBUFFERSIZE; b++) // 4
+                        {
+                            buffer[b] = buffer[b + 1];
+                        }
+                        if (buffer[0] != 0xA5)
+                        {
+                            for (int b = 0; b < rBUFFERSIZE; b++) // 5
+                            {
+                                buffer[b] = buffer[b + 1];
+                            }
+                            if (buffer[0] != 0xA5)
+                            {
+                                for (int b = 0; b < rBUFFERSIZE; b++) // 6
+                                {
+                                    buffer[b] = buffer[b + 1];
+                                }
+                                if (buffer[0] != 0xA5)
+                                {
+                                    for (int b = 0; b < rBUFFERSIZE; b++) // 7
+                                    {
+                                        buffer[b] = buffer[b + 1];
+                                    }
+                                    if (buffer[0] != 0xA5)
+                                    {
+                                        for (int b = 0; b < rBUFFERSIZE; b++) // 8
+                                        {
+                                            buffer[b] = buffer[b + 1];
+                                        }
+                                        if (buffer[0] != 0xA5)
+                                        {
+                                            for (int b = 0; b < rBUFFERSIZE; b++) // 9
+                                            {
+                                                buffer[b] = buffer[b + 1];
+                                            }
+                                            if (buffer[0] != 0xA5)
+                                            {
+                                                for (int b = 0; b < rBUFFERSIZE; b++) // 10
+                                                {
+                                                    buffer[b] = buffer[b + 1];
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return flag; // 返回校验是否通过
+    // ROS_INFO("%d\n",flag);
+}*/
+
+int main(int argc, char *argv[])
+{
+    setlocale(LC_ALL, "");
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<SerialChassis>();
+    // Let ROS spin; background thread handles serial reads and publishes
+    rclcpp::spin(node);
+
+    rclcpp::shutdown();
+    return 0;
+}

@@ -1,0 +1,37 @@
+# ROS 2 / colcon 生成目录
+build/
+install/
+log/
+
+# 本工作空间的独立验证构建
+/cruise_check_build/
+/cruise_check_install/
+/cruise_check_log/
+/mode_check_build/
+/mode_check_install/
+/mode_check_log/
+/symlink_install_manifest.txt
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# CMake 和编译产物
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+*.o
+*.so
+*.so.*
+*.a
+
+# 日志、崩溃转储及编辑器临时文件
+*.log
+core
+core.[0-9]*
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/browse.vc.db

@@ -1,0 +1,26 @@
+cruise_controller_node:
+  ros__parameters:
+    use_sim_time: false
+    # 巡航及转向的角速度上限，单位 rad/s；接近目标/往复端点时减速。
+    cruise_speed: 1.5
+    # 转向时最小非零角速度，单位 rad/s；停止时仍输出 0。
+    min_speed: 0.6
+    circle_direction: 1        # 1: 绕 +Z 逆时针，-1: 顺时针
+    # 转向角速度幅值限制在 min_speed 和 cruise_speed 之间
+    # 根据角度误差计算速度的比例系数，值越大转的越快
+    yaw_gain: 3.0
+    # 容差，旋转到指定朝向和范围巡航是用同一个容差           
+    yaw_tolerance: 0.02        # rad，约 1.15 度
+    control_frequency: 80.0  # Hz
+    tf_timeout: 0.5           # TF 超时输出零，恢复后继续当前状态
+    map_frame: map
+    lidar_frame: livox_frame
+    gimbal_frame: gimbal
+    # gimbal 原点在雷达系的位置(m)，以及 gimbal 相对雷达的 roll/pitch/yaw(rad)。
+    # 暂填零；前提是雷达与云台刚性固定、云台为竖直 yaw 轴。
+    lidar_to_gimbal_xyz: [0.0, -0.14, -0.2]
+    lidar_to_gimbal_rpy: [0.0, 0.0, 0.0]
+    enemy_pose_topic: /enemy_pose    # geometry_msgs/Pose，orientation 为 map 中目标朝向
+    find_topic: /find_already       # std_msgs/Bool，true 停止并锁定
+    lose_topic: /lose_already       # std_msgs/Bool，true 恢复持续转圈
+    speed_topic: /cruise_speed      # geometry_msgs/Twist，仅 angular.z 非零

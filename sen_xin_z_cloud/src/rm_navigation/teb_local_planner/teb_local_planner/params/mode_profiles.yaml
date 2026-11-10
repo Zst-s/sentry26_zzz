@@ -1,0 +1,17 @@
+# default 模式自动使用启动时原 YAML 的速度、加速度和权重，不能在这里重定义。
+# 示例值请按车辆调整；文件仅在配置阶段读取一次。
+profiles:
+  slow:
+    max_vel_x: 0.3
+    max_vel_x_backwards: 0.2
+    max_vel_y: 0.3       # 仅适用于启动时已支持横移的车辆
+    max_vel_theta: 0.3
+    weight_optimaltime: 1.0
+    weight_obstacle: 50.0
+  cautious:
+    max_vel_x: 0.2
+    max_vel_x_backwards: 0.1
+    max_vel_y: 0.2
+    max_vel_theta: 0.3
+    weight_obstacle: 100.0
+    weight_viapoint: 5.0

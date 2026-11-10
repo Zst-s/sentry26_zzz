@@ -1,0 +1,2 @@
+PASS: shell/Python/XML syntax; source and installed guodong.xml equality; source tree preserved including second goal yaw=-90deg; TEB and Nav2 orientation settings; ldd for rm_bt/trans_node2/backend_node.
+PASS: protocol layout C++ check: A5 + total length + 146-byte MCU structure = 148 bytes; all field offsets, signed integers, arrays, little-endian floats; 19-byte control frame length also verified.

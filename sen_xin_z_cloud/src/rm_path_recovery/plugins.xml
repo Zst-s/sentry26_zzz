@@ -1,0 +1,5 @@
+<library path="rm_path_translate_behavior">
+  <class name="rm_path_recovery/PathTranslate" type="rm_path_recovery::PathTranslate" base_class_type="nav2_core::Behavior">
+    <description>Translate toward a forward path lookahead without commanding rotation.</description>
+  </class>
+</library>

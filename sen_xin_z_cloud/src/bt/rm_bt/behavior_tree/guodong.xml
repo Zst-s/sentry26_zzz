@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4"
+      main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RunOnce then_skip="false">
+      <Sequence>
+        <Nav2Pose goal="-0.27;1.48;0;0;0;0;1" speed_limit="0.5"/>
+        <Nav2Pose goal="2.13;2.01;0;0;0;0;1" speed_limit="0.5"/>
+        <PreparePassage if_guodong="0"/>
+        <Delay delay_msec="{fold_wait_ms}">
+          <Nav2Pose goal="4.05;2.06;0;0;0;0;1" speed_limit="0"/>
+        </Delay>
+        <PreparePassage if_guodong="1"/>
+      </Sequence>
+    </RunOnce>
+  </BehaviorTree>
+
+  <!-- Description of Node Models (used by Groot) -->
+  <TreeNodesModel>
+    <Action ID="Nav2Pose"
+            editable="true">
+      <input_port name="goal"
+                  default="0;0;0;0;0;0;1">目标位置(x,y,z,qx,qy,qz,qw)</input_port>
+      <input_port name="speed_limit" default="-1">m/s；0 恢复配置上限，-1 不改变限速</input_port>
+    </Action>
+    <Action ID="PreparePassage"
+            editable="true">
+      <input_port name="if_guodong">0=收头并保持过洞，1=抬头退出过洞</input_port>
+    </Action>
+  </TreeNodesModel>
+
+</root>

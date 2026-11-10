@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "lio": "pointlio",
+  "scan_frame": "lidar_scan",
+  "frame": "map",
+  "association": {
+    "source_frame": "odom",
+    "frame": "map",
+    "lio": "pointlio",
+    "stamp": [
+      1793961652,
+      367359949
+    ],
+    "points": 3031801,
+    "last_lidar_stamp": 1793961654.1675875,
+    "translation": [
+      0.08114215794232753,
+      0.013749412397233927,
+      0
+    ],
+    "quaternion": [
+      0,
+      0,
+      0.011516705518129928,
+      0.9999336805478695
+    ]
+  },
+  "static_correction": {
+    "cleared_static_cells": 50,
+    "source_map_fingerprint": "f72f7d7a9f654d40c0fba8313d63cd3e6afda14273728f23841a0a2df9534dad",
+    "mask_fingerprint": "54baae4e509f330401c642603e78833f7301a3704ac335353868afd380029bae",
+    "map_session_id": "mapping-54e17829ddf146989199770726bfca8e",
+    "mask_stamp": [
+      1793961653,
+      600837106
+    ],
+    "correction_policy": "confirmed_hollow_memory_mask",
+    "source_map_stamp": [
+      1793961652,
+      367359949
+    ],
+    "corrected_map_fingerprint": "23606f2ea9ec226af2cd26aaefdc4859ec913dfbbc2a5dea7f01da66f657e437"
+  },
+  "raw_map": {
+    "yaml": "c9_raw.yaml",
+    "image": "c9_raw.pgm"
+  },
+  "map_geometry": {
+    "resolution": 0.05000000074505806,
+    "size": [
+      280,
+      432
+    ],
+    "origin": [
+      -5.943007082408066,
+      -7.1910323935716125,
+      0.0
+    ],
+    "origin_quaternion": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  },
+  "files": {
+    "map/c9.yaml": "c8be0d7d8cbaae5211d08da030c07b3c05d1d15f758c4f7cb440270bc1b96153",
+    "map/c9.pgm": "f5f68e8b12433d6aaba8ba3663fbb36a957d324a1f37a7a9ea51b8efc186a1bb",
+    "map/c9.posegraph": "20674472127532143437cbe7fb2d5958bd941a0731c8c0c608a13aae983bd0d5",
+    "map/c9.data": "a501d29f89853d514aa2035ee7650f0d3ca4e608116feb2c47a6a8145a3642c5",
+    "PCD/c9.pcd": "d6d1ebbc650798759708699bdfbcbfea3659f64f0545d7f01290f32d0897d206",
+    "map/c9_raw.yaml": "5cbe1332d613de1347e899dd5d6635c7eade734b3229739b6dedb5ea33071e01",
+    "map/c9_raw.pgm": "9a496f7eda93c732f033ad6d13517f28da6267f6400d28ba5f31bdfff7d95714",
+    "map/c9.passages.json": "147ccbe1cad8c194647cc5c626cc1675634fcf3e25474780c26cf1695d56ba37"
+  }
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<package format="3"><name>rm_serial_protocol</name><version>0.1.0</version>
+<description>Packed MCU NAV_Rx_Data_t wire layout and little-endian encoder.</description>
+<maintainer email="dyx@example.com">dyx</maintainer><license>Apache-2.0</license>
+<buildtool_depend>ament_cmake</buildtool_depend>
+<export><build_type>ament_cmake</build_type></export></package>

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "frame": "map",
+  "units": "m",
+  "semantics": "confirmed_passage_clearing_mask_4_connected_regions",
+  "ids_scope": "this_saved_snapshot_only",
+  "source_map_fingerprint": "ea7b7bbb90513147e60f679281ca1a9cb3c2670af57f7650c3117ed4eb4d7824",
+  "mask_fingerprint": "3c9753343903664d593128071244adc889f50dcfc8662ec3a8fd54ad3e0437ab",
+  "map_session_id": "mapping-9b99189c7f834468bbd8f601468c67a4",
+  "mask_stamp": [
+    1794108441,
+    524747478
+  ],
+  "grid": {
+    "resolution": 0.05000000074505806,
+    "width": 305,
+    "height": 255,
+    "origin_xy": [
+      -8.28213427892527,
+      -8.342008976419379
+    ],
+    "origin_yaw": 0.0,
+    "span_end_exclusive": true
+  },
+  "regions": [],
+  "map_yaml": "c11.yaml"
+}

@@ -1,0 +1,6 @@
+serial_chassis_node:
+  ros__parameters:
+    serial_port: /dev/ttyUSB0
+    # 十进制：红方哨兵 7，蓝方哨兵 107。必须匹配裁判系统实际 robot_id。
+    # 不要把 107 写成 0x107；改完 YAML 后重启节点，无需重新编译。
+    sender_id: 7

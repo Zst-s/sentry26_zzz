@@ -1,0 +1,8 @@
+# 第一套：default，自动保存启动时现有的速度和局部 costmap 轮廓，不需要在这里重写。
+# 第二套：slow，下面是占位值。footprint 单位为米，相对于导航车身坐标系。
+profiles:
+  slow:
+    max_vel_x: 1.0
+    max_vel_y: 1.0
+    # 先沿用当前 0.56 m × 0.56 m 的原始轮廓，局部 costmap 仍会添加原有 padding。
+    footprint: [[0.28, 0.28], [0.28, -0.28], [-0.28, -0.28], [-0.28, 0.28]]
