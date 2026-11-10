@@ -1,2 +1,0 @@
-uint16 own_sentry_hp
-uint8 current_stance
